@@ -16,7 +16,22 @@ def get_company_name(stock_number):
     else:
         return None
 
-# Scraping news from Nikkei
+def get_current_stock_price(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    price_element = soup.select_one('span._3rXWJKZF')
+    
+    if price_element:
+        price_text = price_element.text.strip().replace(',', '')
+        try:
+            return float(price_text)
+        except ValueError:
+            return None
+    else:
+        return None
+
 def scrape_nikkei_news(stock_number):
     url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
     response = requests.get(url)
@@ -29,7 +44,6 @@ def scrape_nikkei_news(stock_number):
         news_data.append({"title": title, "url": url})
     return news_data
 
-# Scraping news from Yahoo Finance
 def scrape_yahoo_finance_news(stock_number):
     ticker = f"{stock_number}.T"
     url = f"https://finance.yahoo.co.jp/quote/{ticker}/news"
@@ -43,7 +57,6 @@ def scrape_yahoo_finance_news(stock_number):
         news_data.append({"title": title, "url": url})
     return news_data
 
-# Sentiment analysis
 def analyze_sentiment(text, tokenizer, model):
     inputs = tokenizer(text, return_tensors="pt")
     outputs = model(**inputs)
@@ -59,22 +72,10 @@ def analyze_sentiment(text, tokenizer, model):
     else:
         return "Very Positive"
 
-# Matching stock trends to patterns
 def match_pattern(stock_data, patterns):
     # Placeholder function: in reality, this would involve more complex analysis
     # For simplicity, let's just return a dummy pattern
     return "Head & Shoulders"
-
-# Fetch current stock price
-def get_current_stock_price(stock_number):
-    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    price_tag = soup.find('span', class_='_3rXUuGXGCJdGmsrlhlR34E')
-    if price_tag:
-        return float(price_tag.text.replace(',', ''))
-    else:
-        return None
 
 def main():
     while True:
@@ -90,7 +91,7 @@ def main():
         else:
             print("Company name could not be found. Please enter a valid stock exchange number.")
 
-    purchase_price = float(input("Enter the price of the stock when you bought it (if not purchased, enter 0): "))
+    purchase_price = float(input("Enter the price of the stock when you bought it (if not purchased, enter current price): "))
 
     tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
@@ -149,21 +150,31 @@ def main():
     # Get current stock price
     current_stock_price = get_current_stock_price(stock_number)
     
-    print(f"Nikkei Overall Sentiment: {nikkei_overall_sentiment}")
-    print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
-    print(f"Overall Sentiment: {overall_sentiment}")
-    print(f"Matched Pattern: {pattern_match}")
-    print(f"Current Stock Price: {current_stock_price}")
-    
-    # Decision logic based on sentiment and pattern
-    if overall_sentiment in ["Very Positive", "Positive"] and pattern_match in ["Double bottom", "Rounding bottom", "Cup and handle"]:
-        decision = "Buy"
-    elif overall_sentiment in ["Very Negative", "Negative"] and pattern_match in ["Head & Shoulders", "Triple top"]:
-        decision = "Sell"
+    if current_stock_price is not None:
+        price_difference = current_stock_price - purchase_price
+        price_percentage = (price_difference / purchase_price) * 100
+
+        print(f"\nStock Analysis for {company_name} ({stock_number}):")
+        print(f"Current Price: ¥{current_stock_price:.2f}")
+        print(f"Purchase Price: ¥{purchase_price:.2f}")
+        print(f"Price Difference: ¥{price_difference:.2f} ({price_percentage:.2f}%)")
+        print(f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}")
+        print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
+        print(f"Matched Pattern: {pattern_match}")
+        print(f"Overall Sentiment: {overall_sentiment}")
+        
+        
+        # Decision logic based on sentiment and pattern
+        if overall_sentiment in ["Very Positive", "Positive"] and pattern_match in ["Double bottom", "Rounding bottom", "Cup and handle"]:
+            decision = "Buy"
+        elif overall_sentiment in ["Very Negative", "Negative"] and pattern_match in ["Head & Shoulders", "Triple top"]:
+            decision = "Sell"
+        else:
+            decision = "Hold"
+        
+        print(f"\nRecommended Action: {decision}")
     else:
-        decision = "Hold"
-    
-    print(f"Decision: {decision}")
+        print("Unable to retrieve current stock price. Please check the stock number and try again.")
 
 if __name__ == '__main__':
     main()
