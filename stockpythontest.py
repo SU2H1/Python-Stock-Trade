@@ -4,9 +4,21 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import numpy as np
 
+def get_company_name(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    title_tag = soup.find('title')
+    if title_tag:
+        title = title_tag.text.strip()
+        company_name = title.split('【')[0].strip()
+        return company_name
+    else:
+        return None
+
 # Scraping news from Nikkei
-def scrape_nikkei_news(stock_code):
-    url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_code}&ba=1"
+def scrape_nikkei_news(stock_number):
+    url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
@@ -18,8 +30,9 @@ def scrape_nikkei_news(stock_code):
     return news_data
 
 # Scraping news from Yahoo Finance
-def scrape_yahoo_finance_news(stock_code):
-    url = f"https://finance.yahoo.co.jp/quote/{stock_code}.T/news"
+def scrape_yahoo_finance_news(stock_number):
+    ticker = f"{stock_number}.T"
+    url = f"https://finance.yahoo.co.jp/quote/{ticker}/news"
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
@@ -53,26 +66,37 @@ def match_pattern(stock_data, patterns):
     return "Head & Shoulders"
 
 # Fetch current stock price
-def get_current_stock_price(stock_code):
-    url = f"https://finance.yahoo.co.jp/quote/{stock_code}.T"
+def get_current_stock_price(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
-    price_tag = soup.find('span', class_='stoksPrice')
+    price_tag = soup.find('span', class_='_3rXUuGXGCJdGmsrlhlR34E')
     if price_tag:
         return float(price_tag.text.replace(',', ''))
     else:
         return None
 
 def main():
-    stock_code = input("Enter the stock code (e.g., 3193 for Eternal Hospitality Group Co Ltd): ")
-    company_name = input(f"Enter the name of the company for stock code {stock_code} to confirm: ")
+    while True:
+        stock_number = input("Enter the stock exchange number (e.g., 3092 for ZOZO): ")
+        company_name = get_company_name(stock_number)
+        
+        if company_name:
+            confirmation = input(f"The company for stock number {stock_number} is {company_name}. Is this correct? (y/n): ")
+            if confirmation.lower() == 'y':
+                break
+            else:
+                print("Let's try again with a different stock number.")
+        else:
+            print("Company name could not be found. Please enter a valid stock exchange number.")
+
     purchase_price = float(input("Enter the price of the stock when you bought it (if not purchased, enter 0): "))
 
     tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     
-    nikkei_news_data = scrape_nikkei_news(stock_code)
-    yahoo_finance_news_data = scrape_yahoo_finance_news(stock_code)
+    nikkei_news_data = scrape_nikkei_news(stock_number)
+    yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
     
     nikkei_sentiments = []
     yahoo_finance_sentiments = []
@@ -123,7 +147,7 @@ def main():
     pattern_match = match_pattern(stock_data, ["Head & Shoulders", "Wedge", "Symmetrical triangle", "Ascending triangle", "Double bottom", "Pennant", "Triple bottom", "Price channel", "Cup and handle", "Rounding bottom", "Flag", "Triple top", "GAPS"])
     
     # Get current stock price
-    current_stock_price = get_current_stock_price(stock_code)
+    current_stock_price = get_current_stock_price(stock_number)
     
     print(f"Nikkei Overall Sentiment: {nikkei_overall_sentiment}")
     print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
