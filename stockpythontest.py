@@ -60,6 +60,18 @@ def scrape_yahoo_finance_news(stock_number):
         news_data.append({"title": title, "url": url})
     return news_data
 
+def scrape_google_finance_news(stock_number):
+    url = f"https://www.google.com/finance/quote/{stock_number}:TYO?window=1M"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/finance/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        url = "https://www.google.com" + item['href']
+        news_data.append({"title": title, "url": url})
+    return news_data
+
 def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
     try:
         lang = detect(text)
@@ -201,9 +213,11 @@ def main():
     try:
         nikkei_news_data = scrape_nikkei_news(stock_number)
         yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
+        google_finance_news_data = scrape_google_finance_news(stock_number)
         
         nikkei_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in nikkei_news_data]
         yahoo_finance_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in yahoo_finance_news_data]
+        google_finance_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in google_finance_news_data]
         
         def get_overall_sentiment(sentiments):
             if not sentiments:
@@ -213,10 +227,11 @@ def main():
         
         nikkei_overall_sentiment = get_overall_sentiment(nikkei_sentiments)
         yahoo_finance_overall_sentiment = get_overall_sentiment(yahoo_finance_sentiments)
+        google_finance_overall_sentiment = get_overall_sentiment(google_finance_sentiments)
         
-        # Calculate overall sentiment as (Yahoo article value + Nikkei article rating value) / 2
-        if nikkei_sentiments and yahoo_finance_sentiments:
-            overall_sentiment_value = (sum(nikkei_sentiments) / len(nikkei_sentiments) + sum(yahoo_finance_sentiments) / len(yahoo_finance_sentiments)) / 2
+        # Calculate overall sentiment as (Yahoo article value + Nikkei article rating value + Google article value) / 3
+        if nikkei_sentiments and yahoo_finance_sentiments and google_finance_sentiments:
+            overall_sentiment_value = (sum(nikkei_sentiments) / len(nikkei_sentiments) + sum(yahoo_finance_sentiments) / len(yahoo_finance_sentiments) + sum(google_finance_sentiments) / len(google_finance_sentiments)) / 3
             overall_sentiment = sentiment_to_text(overall_sentiment_value)
         else:
             overall_sentiment = "Insufficient data"
@@ -253,6 +268,7 @@ def main():
             
             print(f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}")
             print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
+            print(f"Google Finance Overall Sentiment: {google_finance_overall_sentiment}")
             print(f"Overall Sentiment: {overall_sentiment}")
             
             if matched_pattern == "Unable to retrieve stock data":
@@ -279,7 +295,8 @@ def main():
                 
                 news_sources = {
                     "Nikkei": list(zip(nikkei_news_data, map(sentiment_to_text, nikkei_sentiments))),
-                    "Yahoo Finance": list(zip(yahoo_finance_news_data, map(sentiment_to_text, yahoo_finance_sentiments)))
+                    "Yahoo Finance": list(zip(yahoo_finance_news_data, map(sentiment_to_text, yahoo_finance_sentiments))),
+                    "Google Finance": list(zip(google_finance_news_data, map(sentiment_to_text, google_finance_sentiments)))
                 }
                 
                 if source_request in news_sources:
@@ -290,7 +307,7 @@ def main():
                         print(f"URL: {article['url']}")
                         print()
                 else:
-                    print("Invalid source name. Available sources: Nikkei, Yahoo Finance")
+                    print("Invalid source name. Available sources: Nikkei, Yahoo Finance, Google Finance")
         else:
             print("Unable to retrieve current stock price. Please check the stock number and try again.")
     except Exception as e:
