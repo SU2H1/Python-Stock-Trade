@@ -225,6 +225,25 @@ def identify_pattern(stock_data):
     
     return "No Clear Pattern"
 
+def get_suggested_price(current_price, action, stock_data):
+    if not stock_data:
+        return None
+
+    prices = [price for _, price in stock_data]
+    avg_price = sum(prices) / len(prices)
+    std_dev = (sum((price - avg_price) ** 2 for price in prices) / len(prices)) ** 0.5
+
+    if action == "Buy":
+        # Suggest a price slightly below the current price, but not lower than 1 standard deviation below the average
+        suggested_price = max(current_price * 0.98, avg_price - std_dev)
+    elif action == "Sell":
+        # Suggest a price slightly above the current price, but not higher than 1 standard deviation above the average
+        suggested_price = min(current_price * 1.02, avg_price + std_dev)
+    else:
+        return None
+
+    return round(suggested_price, 2)
+
 def main():
     while True:
         stock_input = input("Enter the stock exchange number (e.g., 3092 for ZOZO): ").strip().upper()
@@ -311,15 +330,21 @@ def main():
             print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
             print(f"Overall Sentiment: {overall_sentiment}")
             
-            # New decision logic based on sentiment and purchase price
+            # Updated decision logic with price suggestions
             if overall_sentiment in ["Very Positive", "Positive"]:
                 if purchase_price is None or current_stock_price < purchase_price:
                     decision = "Buy"
+                    suggested_price = get_suggested_price(current_stock_price, "Buy", stock_data)
+                    if suggested_price:
+                        decision += f" (Suggested buy price: ¥{suggested_price})"
                 else:
                     decision = "Hold (Consider taking profits)"
             elif overall_sentiment in ["Very Negative", "Negative"]:
                 if purchase_price is None or current_stock_price > purchase_price:
                     decision = "Sell"
+                    suggested_price = get_suggested_price(current_stock_price, "Sell", stock_data)
+                    if suggested_price:
+                        decision += f" (Suggested sell price: ¥{suggested_price})"
                 else:
                     decision = "Hold (Consider cutting losses)"
             else:  # Neutral sentiment
