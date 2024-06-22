@@ -120,25 +120,108 @@ def identify_pattern(stock_data):
         return "Insufficient data for pattern identification"
     
     prices = [price for _, price in stock_data]
-    changes = np.diff(prices)
+    dates = [date for date, _ in stock_data]
     
-    if np.all(changes <= 0):
-        return "Downward Trend"
-    elif np.all(changes >= 0):
-        return "Upward Trend"
+    # Reverse the lists to have oldest data first
+    prices = prices[::-1]
+    dates = dates[::-1]
     
     n = len(prices)
+    changes = np.diff(prices)
+    
+    def is_increasing(data):
+        return np.all(np.diff(data) >= 0)
+    
+    def is_decreasing(data):
+        return np.all(np.diff(data) <= 0)
+    
+    def find_peaks(data, order=3):
+        peaks = []
+        for i in range(order, len(data) - order):
+            if all(data[i] > data[i-j] for j in range(1, order+1)) and all(data[i] > data[i+j] for j in range(1, order+1)):
+                peaks.append(i)
+        return np.array(peaks)
+    
+    def find_troughs(data, order=3):
+        troughs = []
+        for i in range(order, len(data) - order):
+            if all(data[i] < data[i-j] for j in range(1, order+1)) and all(data[i] < data[i+j] for j in range(1, order+1)):
+                troughs.append(i)
+        return np.array(troughs)
+    
+    # Upward and Downward Trends
+    if is_increasing(prices):
+        return "Upward Trend"
+    elif is_decreasing(prices):
+        return "Downward Trend"
+    
+    # V-Shape Recovery and Inverted V-Shape
     if n >= 5:
         if prices[0] > prices[1] > prices[2] < prices[3] < prices[4]:
             return "V-Shape Recovery"
         elif prices[0] < prices[1] < prices[2] > prices[3] > prices[4]:
             return "Inverted V-Shape"
     
-    if n >= 7:
-        if prices[0] > prices[3] and prices[3] < prices[6]:
+    # Double Bottom and Double Top
+    peaks = find_peaks(prices)
+    troughs = find_troughs(prices)
+    
+    if len(troughs) >= 2 and troughs[-1] - troughs[-2] >= 5:
+        if abs(prices[troughs[-1]] - prices[troughs[-2]]) / prices[troughs[-2]] < 0.03:
             return "Double Bottom"
-        elif prices[0] < prices[3] and prices[3] > prices[6]:
+    
+    if len(peaks) >= 2 and peaks[-1] - peaks[-2] >= 5:
+        if abs(prices[peaks[-1]] - prices[peaks[-2]]) / prices[peaks[-2]] < 0.03:
             return "Double Top"
+    
+    # Head and Shoulders
+    if len(peaks) >= 3:
+        if prices[peaks[1]] > prices[peaks[0]] and prices[peaks[1]] > prices[peaks[2]]:
+            if abs(prices[peaks[0]] - prices[peaks[2]]) / prices[peaks[0]] < 0.03:
+                return "Head and Shoulders"
+    
+    # Triangles and Wedges
+    if n >= 15:
+        first_half = prices[:n//2]
+        second_half = prices[n//2:]
+        
+        if is_increasing(first_half) and is_decreasing(second_half):
+            return "Ascending Triangle"
+        elif is_decreasing(first_half) and is_increasing(second_half):
+            return "Descending Triangle"
+        elif (max(first_half) > max(second_half) and min(first_half) < min(second_half)):
+            return "Symmetrical Triangle"
+        elif (max(first_half) > max(second_half) and min(first_half) > min(second_half)):
+            return "Falling Wedge"
+        elif (max(first_half) < max(second_half) and min(first_half) < min(second_half)):
+            return "Rising Wedge"
+    
+    # Pennant and Flag
+    if n >= 20:
+        if is_increasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
+            return "Bullish Pennant"
+        elif is_decreasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
+            return "Bearish Pennant"
+        elif is_increasing(prices[:10]) and is_decreasing(prices[10:]):
+            return "Bullish Flag"
+        elif is_decreasing(prices[:10]) and is_increasing(prices[10:]):
+            return "Bearish Flag"
+    
+    # Rounding Bottom and Top
+    if n >= 15:
+        first_third = prices[:n//3]
+        last_third = prices[-n//3:]
+        if is_decreasing(first_third) and is_increasing(last_third):
+            return "Rounding Bottom"
+        elif is_increasing(first_third) and is_decreasing(last_third):
+            return "Rounding Top"
+    
+    # Cup and Handle
+    if n >= 20:
+        cup = prices[:15]
+        handle = prices[15:]
+        if is_decreasing(cup[:7]) and is_increasing(cup[7:]) and is_decreasing(handle):
+            return "Cup and Handle"
     
     return "No Clear Pattern"
 
@@ -222,26 +305,30 @@ def main():
                 print("Purchase Price: N/A")
                 print("Price Difference: N/A")
             
+            print(f"\nIdentified 30-Day Pattern: {matched_pattern}")
             
             print(f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}")
             print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
-            print(f"\nIdentified 30-Day Pattern: {matched_pattern}")
             print(f"Overall Sentiment: {overall_sentiment}")
             
-            if matched_pattern == "Unable to retrieve stock data":
-                if overall_sentiment in ["Very Positive", "Positive"]:
-                    decision = "Consider Buying (based on sentiment only)"
-                elif overall_sentiment in ["Very Negative", "Negative"]:
-                    decision = "Consider Selling (based on sentiment only)"
-                else:
-                    decision = "Hold (insufficient data for strong recommendation)"
-            else:
-                if overall_sentiment in ["Very Positive", "Positive"] and matched_pattern in ["Upward Trend", "V-Shape Recovery", "Double Bottom"]:
+            # New decision logic based on sentiment and purchase price
+            if overall_sentiment in ["Very Positive", "Positive"]:
+                if purchase_price is None or current_stock_price < purchase_price:
                     decision = "Buy"
-                elif overall_sentiment in ["Very Negative", "Negative"] and matched_pattern in ["Downward Trend", "Inverted V-Shape", "Double Top"]:
+                else:
+                    decision = "Hold (Consider taking profits)"
+            elif overall_sentiment in ["Very Negative", "Negative"]:
+                if purchase_price is None or current_stock_price > purchase_price:
                     decision = "Sell"
                 else:
-                    decision = "Hold"
+                    decision = "Hold (Consider cutting losses)"
+            else:  # Neutral sentiment
+                if purchase_price is None:
+                    decision = "Hold (Insufficient data for strong recommendation)"
+                elif current_stock_price > purchase_price:
+                    decision = "Hold (Consider taking small profits)"
+                else:
+                    decision = "Hold (Monitor closely)"
             
             print(f"\nRecommended Action: {decision}")
             
