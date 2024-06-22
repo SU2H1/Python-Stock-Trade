@@ -1,0 +1,403 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import requests
+from bs4 import BeautifulSoup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import numpy as np
+from datetime import datetime, timedelta
+import json
+from langdetect import detect
+import pandas as pd
+import yfinance as yf
+
+def get_company_name(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    title_tag = soup.find('title')
+    if title_tag:
+        title = title_tag.text.strip()
+        company_name = title.split('【')[0].strip()
+        return company_name
+    else:
+        return None
+
+def get_current_stock_price(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    price_element = soup.select_one('span._3rXWJKZF')
+    
+    if price_element:
+        price_text = price_element.text.strip().replace(',', '')
+        try:
+            return float(price_text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+def scrape_nikkei_news(stock_number):
+    url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        url = "https://www.nikkei.com" + item['href']
+        news_data.append({"title": title, "url": url})
+    return news_data
+
+def scrape_yahoo_finance_news(stock_number):
+    ticker = f"{stock_number}.T"
+    url = f"https://finance.yahoo.co.jp/quote/{ticker}/news"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        url = "https://finance.yahoo.co.jp" + item['href']
+        news_data.append({"title": title, "url": url})
+    return news_data
+
+def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
+    try:
+        lang = detect(text)
+    except:
+        lang = 'ja'  # Default to Japanese if detection fails
+
+    if lang == 'ja':
+        tokenizer = ja_tokenizer
+        model = ja_model
+    else:
+        tokenizer = en_tokenizer
+        model = en_model
+
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    outputs = model(**inputs)
+    sentiment_score = torch.softmax(outputs.logits, dim=1).tolist()[0]
+    return sentiment_score[0]  # Return the raw sentiment score
+
+def sentiment_to_text(score):
+    if score > 0.8:
+        return "Very Negative"
+    elif score > 0.6:
+        return "Negative"
+    elif score > 0.4:
+        return "Neutral"
+    elif score > 0.2:
+        return "Positive"
+    else:
+        return "Very Positive"
+
+def get_stock_data(stock_number):
+    ticker = f"{stock_number}.T"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date)
+        if df.empty:
+            print("No data found for the specified stock number.")
+            return None
+        
+        df = df.reset_index()
+        df['Date'] = pd.to_datetime(df['Date'])
+        stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
+        
+        # Sort by date (newest first) and return up to 30 days of data
+        stock_data.sort(key=lambda x: x[0], reverse=True)
+        return stock_data[:30]
+    
+    except Exception as e:
+        print(f"Error retrieving stock data: {e}")
+        return None
+
+def identify_pattern(stock_data):
+    if stock_data is None or len(stock_data) < 5:
+        return "Insufficient data for pattern identification"
+    
+    prices = [price for _, price in stock_data]
+    dates = [date for date, _ in stock_data]
+    
+    # Reverse the lists to have oldest data first
+    prices = prices[::-1]
+    dates = dates[::-1]
+    
+    n = len(prices)
+    changes = np.diff(prices)
+    
+    def is_increasing(data):
+        return np.all(np.diff(data) >= 0)
+    
+    def is_decreasing(data):
+        return np.all(np.diff(data) <= 0)
+    
+    def find_peaks(data, order=3):
+        peaks = []
+        for i in range(order, len(data) - order):
+            if all(data[i] > data[i-j] for j in range(1, order+1)) and all(data[i] > data[i+j] for j in range(1, order+1)):
+                peaks.append(i)
+        return np.array(peaks)
+    
+    def find_troughs(data, order=3):
+        troughs = []
+        for i in range(order, len(data) - order):
+            if all(data[i] < data[i-j] for j in range(1, order+1)) and all(data[i] < data[i+j] for j in range(1, order+1)):
+                troughs.append(i)
+        return np.array(troughs)
+    
+    # Upward and Downward Trends
+    if is_increasing(prices):
+        return "Upward Trend"
+    elif is_decreasing(prices):
+        return "Downward Trend"
+    
+    # V-Shape Recovery and Inverted V-Shape
+    if n >= 5:
+        if prices[0] > prices[1] > prices[2] < prices[3] < prices[4]:
+            return "V-Shape Recovery"
+        elif prices[0] < prices[1] < prices[2] > prices[3] > prices[4]:
+            return "Inverted V-Shape"
+    
+    # Double Bottom and Double Top
+    peaks = find_peaks(prices)
+    troughs = find_troughs(prices)
+    
+    if len(troughs) >= 2 and troughs[-1] - troughs[-2] >= 5:
+        if abs(prices[troughs[-1]] - prices[troughs[-2]]) / prices[troughs[-2]] < 0.03:
+            return "Double Bottom"
+    
+    if len(peaks) >= 2 and peaks[-1] - peaks[-2] >= 5:
+        if abs(prices[peaks[-1]] - prices[peaks[-2]]) / prices[peaks[-2]] < 0.03:
+            return "Double Top"
+    
+    # Head and Shoulders
+    if len(peaks) >= 3:
+        if prices[peaks[1]] > prices[peaks[0]] and prices[peaks[1]] > prices[peaks[2]]:
+            if abs(prices[peaks[0]] - prices[peaks[2]]) / prices[peaks[0]] < 0.03:
+                return "Head and Shoulders"
+    
+    # Triangles and Wedges
+    if n >= 15:
+        first_half = prices[:n//2]
+        second_half = prices[n//2:]
+        
+        if is_increasing(first_half) and is_decreasing(second_half):
+            return "Ascending Triangle"
+        elif is_decreasing(first_half) and is_increasing(second_half):
+            return "Descending Triangle"
+        elif (max(first_half) > max(second_half) and min(first_half) < min(second_half)):
+            return "Symmetrical Triangle"
+        elif (max(first_half) > max(second_half) and min(first_half) > min(second_half)):
+            return "Falling Wedge"
+        elif (max(first_half) < max(second_half) and min(first_half) < min(second_half)):
+            return "Rising Wedge"
+    
+    # Pennant and Flag
+    if n >= 20:
+        if is_increasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
+            return "Bullish Pennant"
+        elif is_decreasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
+            return "Bearish Pennant"
+        elif is_increasing(prices[:10]) and is_decreasing(prices[10:]):
+            return "Bullish Flag"
+        elif is_decreasing(prices[:10]) and is_increasing(prices[10:]):
+            return "Bearish Flag"
+    
+    # Rounding Bottom and Top
+    if n >= 15:
+        first_third = prices[:n//3]
+        last_third = prices[-n//3:]
+        if is_decreasing(first_third) and is_increasing(last_third):
+            return "Rounding Bottom"
+        elif is_increasing(first_third) and is_decreasing(last_third):
+            return "Rounding Top"
+    
+    # Cup and Handle
+    if n >= 20:
+        cup = prices[:15]
+        handle = prices[15:]
+        if is_decreasing(cup[:7]) and is_increasing(cup[7:]) and is_decreasing(handle):
+            return "Cup and Handle"
+    
+    return "No Clear Pattern"
+
+def get_overall_sentiment(sentiments):
+    if not sentiments:
+        return "No data"
+    avg_sentiment = sum(sentiments) / len(sentiments)
+    return sentiment_to_text(avg_sentiment)
+
+class StockAnalysisApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Stock Analysis App")
+        self.geometry("600x800")
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Stock Number Entry
+        tk.Label(self, text="Enter the stock exchange number:").pack(pady=5)
+        self.stock_entry = tk.Entry(self)
+        self.stock_entry.pack(pady=5)
+
+        # Purchase Price Entry
+        tk.Label(self, text="Enter the purchase price (if applicable):").pack(pady=5)
+        self.price_entry = tk.Entry(self)
+        self.price_entry.pack(pady=5)
+
+        # Analyze Button
+        tk.Button(self, text="Analyze", command=self.analyze_stock).pack(pady=10)
+
+        # Results Display
+        self.result_text = tk.Text(self, height=20, width=70)
+        self.result_text.pack(pady=10)
+
+        # News Source Dropdown
+        tk.Label(self, text="Select news source for detailed sentiment:").pack(pady=5)
+        self.news_source = tk.StringVar(self)
+        self.news_source.set("Select Source")
+        self.news_dropdown = ttk.Combobox(self, textvariable=self.news_source, values=["Nikkei", "Yahoo Finance"])
+        self.news_dropdown.pack(pady=5)
+
+        # Show Detailed Sentiment Button
+        tk.Button(self, text="Show Detailed Sentiment", command=self.show_detailed_sentiment).pack(pady=10)
+
+    def analyze_stock(self):
+        stock_number = self.stock_entry.get().strip().upper()
+        purchase_price = self.price_entry.get().strip()
+
+        if not stock_number.isdigit():
+            messagebox.showerror("Error", "Please enter a valid numeric stock code.")
+            return
+
+        if purchase_price.lower() == 'n/a' or purchase_price == '':
+            purchase_price = None
+        else:
+            try:
+                purchase_price = float(purchase_price)
+            except ValueError:
+                messagebox.showerror("Error", "Invalid purchase price. Please enter a number or 'n/a'.")
+                return
+
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, "Analyzing... Please wait.\n")
+        self.update_idletasks()
+
+        try:
+            company_name = get_company_name(stock_number)
+            if not company_name:
+                messagebox.showerror("Error", "Company name could not be found. Please check the stock number.")
+                return
+
+            ja_tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+            ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+            en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+            en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+
+            nikkei_news_data = scrape_nikkei_news(stock_number)
+            yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
+
+            nikkei_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in nikkei_news_data]
+            yahoo_finance_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in yahoo_finance_news_data]
+
+            nikkei_overall_sentiment = get_overall_sentiment(nikkei_sentiments)
+            yahoo_finance_overall_sentiment = get_overall_sentiment(yahoo_finance_sentiments)
+
+            if nikkei_sentiments and yahoo_finance_sentiments:
+                overall_sentiment_value = (sum(nikkei_sentiments) / len(nikkei_sentiments) + sum(yahoo_finance_sentiments) / len(yahoo_finance_sentiments)) / 2
+                overall_sentiment = sentiment_to_text(overall_sentiment_value)
+            else:
+                overall_sentiment = "Insufficient data"
+
+            stock_data = get_stock_data(stock_number)
+            if stock_data:
+                matched_pattern = identify_pattern(stock_data)
+            else:
+                matched_pattern = "Unable to retrieve stock data"
+
+            current_stock_price = get_current_stock_price(stock_number)
+
+            if current_stock_price is not None:
+                result = f"Stock Analysis for {company_name} ({stock_number}):\n"
+                result += f"Current Price: ¥{current_stock_price:.2f}\n"
+
+                if purchase_price is not None:
+                    price_difference = current_stock_price - purchase_price
+                    price_percentage = (price_difference / purchase_price) * 100
+                    result += f"Purchase Price: ¥{purchase_price:.2f}\n"
+                    result += f"Price Difference: ¥{price_difference:.2f} ({price_percentage:.2f}%)\n"
+                else:
+                    result += "Purchase Price: N/A\n"
+                    result += "Price Difference: N/A\n"
+
+                result += f"\nIdentified 30-Day Pattern: {matched_pattern}\n"
+                result += f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}\n"
+                result += f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}\n"
+                result += f"Overall Sentiment: {overall_sentiment}\n"
+
+                # New decision logic based on sentiment and purchase price
+                if overall_sentiment in ["Very Positive", "Positive"]:
+                    if purchase_price is None or current_stock_price < purchase_price:
+                        decision = "Buy"
+                    else:
+                        decision = "Hold (Consider taking profits)"
+                elif overall_sentiment in ["Very Negative", "Negative"]:
+                    if purchase_price is None or current_stock_price > purchase_price:
+                        decision = "Sell"
+                    else:
+                        decision = "Hold (Consider cutting losses)"
+                else:  # Neutral sentiment
+                    if purchase_price is None:
+                        decision = "Hold (Insufficient data for strong recommendation)"
+                    elif current_stock_price > purchase_price:
+                        decision = "Hold (Consider taking small profits)"
+                    else:
+                        decision = "Hold (Monitor closely)"
+
+                result += f"\nRecommended Action: {decision}\n"
+
+                self.result_text.delete(1.0, tk.END)
+                self.result_text.insert(tk.END, result)
+
+                self.nikkei_news_data = nikkei_news_data
+                self.yahoo_finance_news_data = yahoo_finance_news_data
+                self.nikkei_sentiments = nikkei_sentiments
+                self.yahoo_finance_sentiments = yahoo_finance_sentiments
+            else:
+                messagebox.showerror("Error", "Unable to retrieve current stock price. Please check the stock number and try again.")
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred while processing the stock data: {str(e)}")
+
+    def show_detailed_sentiment(self):
+        source = self.news_source.get()
+        if source not in ["Nikkei", "Yahoo Finance"]:
+            messagebox.showerror("Error", "Please select a valid news source.")
+            return
+
+        if source == "Nikkei":
+            news_data = self.nikkei_news_data
+            sentiments = self.nikkei_sentiments
+        else:
+            news_data = self.yahoo_finance_news_data
+            sentiments = self.yahoo_finance_sentiments
+
+        result = f"\nDetailed Sentiment Analysis for {source}:\n"
+        for article, sentiment in zip(news_data, map(sentiment_to_text, sentiments)):
+            result += f"Title: {article['title']}\n"
+            result += f"Sentiment: {sentiment}\n"
+            result += f"URL: {article['url']}\n\n"
+
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, result)
+
+if __name__ == '__main__':
+    app = StockAnalysisApp()
+    app.mainloop()
