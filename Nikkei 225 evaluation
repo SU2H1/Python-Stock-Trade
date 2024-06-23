@@ -1,0 +1,240 @@
+import requests
+from bs4 import BeautifulSoup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import numpy as np
+from datetime import datetime, timedelta
+import pandas as pd
+import yfinance as yf
+from langdetect import detect
+
+def get_stock_codes_and_names():
+    url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_225.html"
+    
+    print(f"Fetching URL: {url}")
+    response = requests.get(url)
+    
+    print(f"Response status code: {response.status_code}")
+    
+    if response.status_code != 200:
+        print(f"Failed to fetch the webpage. Status code: {response.status_code}")
+        return []
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    # Print the first 500 characters of the HTML content for debugging
+    print("First 500 characters of HTML content:")
+    print(soup.prettify()[:500])
+    
+    # Try to find the table with the original class
+    stock_table = soup.find('table', {'class': 'md-l-table-type01'})
+    
+    if stock_table is None:
+        print("Could not find table with class 'md-l-table-type01'")
+        # Try to find any table in the HTML
+        all_tables = soup.find_all('table')
+        print(f"Number of tables found: {len(all_tables)}")
+        
+        # Print classes of all tables found
+        for i, table in enumerate(all_tables):
+            print(f"Table {i+1} classes: {table.get('class', 'No class')}")
+        
+        # If no table with the expected class is found, try to find a table with a similar structure
+        for table in all_tables:
+            if table.find('tr'):  # Check if the table has any rows
+                stock_table = table
+                print(f"Using table with classes: {stock_table.get('class', 'No class')}")
+                break
+        
+        if stock_table is None:
+            print("Could not find any suitable table")
+            return []
+
+    stock_data = []
+    for row in stock_table.find_all('tr')[1:]:
+        cells = row.find_all('td')
+        if cells:
+            stock_code = cells[0].text.strip()
+            company_name = cells[1].text.strip()
+            stock_data.append((stock_code, company_name))
+    
+    print(f"Found {len(stock_data)} stocks")
+    return stock_data
+
+def get_company_name(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    title_tag = soup.find('title')
+    if title_tag:
+        title = title_tag.text.strip()
+        company_name = title.split('【')[0].strip()
+        return company_name
+    else:
+        return None
+
+def scrape_nikkei_news(stock_number):
+    url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        url = "https://www.nikkei.com" + item['href']
+        news_data.append({"title": title, "url": url})
+    return news_data
+
+def scrape_yahoo_finance_news(stock_number):
+    ticker = f"{stock_number}.T"
+    url = f"https://finance.yahoo.co.jp/quote/{ticker}/news"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        href = item['href']
+        if href.startswith("https://finance.yahoo.co.jp"):
+            href = href[len("https://finance.yahoo.co.jp"):]
+        url = "https://finance.yahoo.co.jp" + href
+        news_data.append({"title": title, "url": url})
+    return news_data
+
+def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
+    try:
+        lang = detect(text)
+    except:
+        lang = 'ja'  # Default to Japanese if detection fails
+
+    if lang == 'ja':
+        tokenizer = ja_tokenizer
+        model = ja_model
+    else:
+        tokenizer = en_tokenizer
+        model = en_model
+
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    outputs = model(**inputs)
+    sentiment_score = torch.softmax(outputs.logits, dim=1).tolist()[0]
+    return sentiment_score[0]  # Return the raw sentiment score
+
+def sentiment_to_text(score):
+    if score > 0.8:
+        return "Very Negative"
+    elif score > 0.6:
+        return "Negative"
+    elif score > 0.4:
+        return "Neutral"
+    elif score > 0.2:
+        return "Positive"
+    else:
+        return "Very Positive"
+
+def get_stock_data(stock_number):
+    ticker = f"{stock_number}.T"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date)
+        if df.empty:
+            print("No data found for the specified stock number.")
+            return None
+        
+        df = df.reset_index()
+        df['Date'] = pd.to_datetime(df['Date'])
+        stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
+        
+        # Sort by date (newest first) and return up to 30 days of data
+        stock_data.sort(key=lambda x: x[0], reverse=True)
+        return stock_data[:30]
+    
+    except Exception as e:
+        print(f"Error retrieving stock data: {e}")
+        return None
+
+def calculate_stock_trend(stock_data):
+    if not stock_data or len(stock_data) < 2:
+        return "No trend data"
+    
+    first_price = stock_data[-1][1]  # Oldest price
+    last_price = stock_data[0][1]   # Most recent price
+    
+    percent_change = ((last_price - first_price) / first_price) * 100
+    
+    if percent_change > 5:
+        return "Strong Uptrend"
+    elif percent_change > 2:
+        return "Uptrend"
+    elif percent_change < -5:
+        return "Strong Downtrend"
+    elif percent_change < -2:
+        return "Downtrend"
+    else:
+        return "Neutral"
+
+def main():
+    print("Fetching stock codes and company names from the website...")
+    stock_data = get_stock_codes_and_names()
+    print(f"Found {len(stock_data)} stocks.")
+    
+    ja_tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+    ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+    
+    en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+    en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+    
+    stock_analysis = []
+    
+    for stock_number, company_name in stock_data:
+        try:
+            print(f"Analyzing {company_name} ({stock_number})...")
+            
+            nikkei_news_data = scrape_nikkei_news(stock_number)
+            yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
+            
+            nikkei_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in nikkei_news_data]
+            yahoo_finance_sentiments = [analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model) for news in yahoo_finance_news_data]
+            
+            def get_overall_sentiment(sentiments):
+                if not sentiments:
+                    return 0.5  # Neutral if no data
+                avg_sentiment = sum(sentiments) / len(sentiments)
+                return avg_sentiment
+            
+            nikkei_overall_sentiment = get_overall_sentiment(nikkei_sentiments)
+            yahoo_finance_overall_sentiment = get_overall_sentiment(yahoo_finance_sentiments)
+            
+            overall_sentiment_value = (nikkei_overall_sentiment + yahoo_finance_overall_sentiment) / 2
+            overall_sentiment = sentiment_to_text(overall_sentiment_value)
+            
+            stock_price_data = get_stock_data(stock_number)
+            current_stock_price = stock_price_data[0][1] if stock_price_data else None
+            stock_trend = calculate_stock_trend(stock_price_data)
+            
+            stock_analysis.append({
+                "company_name": company_name,
+                "stock_number": stock_number,
+                "current_stock_price": current_stock_price,
+                "overall_sentiment": overall_sentiment,
+                "overall_sentiment_value": overall_sentiment_value,
+                "stock_trend": stock_trend
+            })
+        except Exception as e:
+            print(f"Error analyzing {stock_number}: {e}")
+    
+    # Sort stocks based on overall sentiment value (higher is better)
+    stock_analysis.sort(key=lambda x: x["overall_sentiment_value"], reverse=True)
+    
+    print("\nStock Analysis Results (Sorted from Best to Worst):")
+    for i, stock in enumerate(stock_analysis, 1):
+        print(f"{i}. {stock['company_name']} ({stock['stock_number']}):")
+        print(f"   Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "   Current Price: N/A")
+        print(f"   Overall Sentiment: {stock['overall_sentiment']}")
+        print(f"   Sentiment Score: {stock['overall_sentiment_value']:.2f}")
+        print(f"   Stock Trend: {stock['stock_trend']}")
+        print()
+
+if __name__ == '__main__':
+    main()
