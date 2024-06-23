@@ -174,6 +174,58 @@ def calculate_stock_trend(stock_data):
     else:
         return "Neutral"
 
+def display_stock_info(stock, rank):
+    print(f"{rank}. {stock['company_name']} ({stock['stock_number']}):")
+    print(f"   Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "   Current Price: N/A")
+    print(f"   Overall Sentiment: {stock['overall_sentiment']}")
+    print(f"   Sentiment Score: {stock['overall_sentiment_value']:.2f}")
+    print(f"   Stock Trend: {stock['stock_trend']}")
+    print()
+
+def display_detailed_analysis(stock):
+    print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
+    print(f"Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "Current Price: N/A")
+    print(f"Overall Sentiment: {stock['overall_sentiment']}")
+    print(f"Sentiment Score: {stock['overall_sentiment_value']:.2f}")
+    print(f"Stock Trend: {stock['stock_trend']}")
+    print("\nNikkei News Sentiment:")
+    for i, news in enumerate(stock['nikkei_news'], 1):
+        print(f"  {i}. {news['title']}")
+        print(f"     Sentiment: {sentiment_to_text(news['sentiment'])}")
+    print("\nYahoo Finance News Sentiment:")
+    for i, news in enumerate(stock['yahoo_news'], 1):
+        print(f"  {i}. {news['title']}")
+        print(f"     Sentiment: {sentiment_to_text(news['sentiment'])}")
+    print()
+
+def interactive_results_display(stock_analysis):
+    current_index = 0
+    while True:
+        for i in range(current_index, min(current_index + 10, len(stock_analysis))):
+            display_stock_info(stock_analysis[i], i + 1)
+        
+        if current_index + 10 >= len(stock_analysis):
+            print("End of list reached.")
+            break
+        
+        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, or 'exit' to quit: ").strip().lower()
+        
+        if user_input == 'continue':
+            current_index += 10
+        elif user_input.startswith('#'):
+            try:
+                rank = int(user_input[1:]) - 1
+                if 0 <= rank < len(stock_analysis):
+                    display_detailed_analysis(stock_analysis[rank])
+                else:
+                    print("Invalid rank number.")
+            except ValueError:
+                print("Invalid input. Please use '#<rank>' format.")
+        elif user_input == 'exit':
+            break
+        else:
+            print("Invalid input. Please type 'continue', '#<rank>', or 'exit'.")
+
 def main():
     print("Fetching stock codes and company names from the website...")
     stock_data = get_stock_codes_and_names()
@@ -219,7 +271,9 @@ def main():
                 "current_stock_price": current_stock_price,
                 "overall_sentiment": overall_sentiment,
                 "overall_sentiment_value": overall_sentiment_value,
-                "stock_trend": stock_trend
+                "stock_trend": stock_trend,
+                "nikkei_news": [{"title": news['title'], "sentiment": sentiment} for news, sentiment in zip(nikkei_news_data, nikkei_sentiments)],
+                "yahoo_news": [{"title": news['title'], "sentiment": sentiment} for news, sentiment in zip(yahoo_finance_news_data, yahoo_finance_sentiments)]
             })
         except Exception as e:
             print(f"Error analyzing {stock_number}: {e}")
@@ -228,13 +282,7 @@ def main():
     stock_analysis.sort(key=lambda x: x["overall_sentiment_value"], reverse=True)
     
     print("\nStock Analysis Results (Sorted from Best to Worst):")
-    for i, stock in enumerate(stock_analysis, 1):
-        print(f"{i}. {stock['company_name']} ({stock['stock_number']}):")
-        print(f"   Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "   Current Price: N/A")
-        print(f"   Overall Sentiment: {stock['overall_sentiment']}")
-        print(f"   Sentiment Score: {stock['overall_sentiment_value']:.2f}")
-        print(f"   Stock Trend: {stock['stock_trend']}")
-        print()
+    interactive_results_display(stock_analysis)
 
 if __name__ == '__main__':
     main()
