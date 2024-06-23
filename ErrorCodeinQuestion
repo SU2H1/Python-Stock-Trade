@@ -1,0 +1,13 @@
+[Running] python3 -u "/Users/censored/Python-Stock-Trade/Nikkei"
+Traceback (most recent call last):
+File "/Users/censored/Python-Stock-Trade/Nikkei", line 2, in <module>
+from bs4 import BeautifulSoup
+ModuleNotFoundError: No module named 'bs4'
+
+[Done] exited with code=1 in 0.326 seconds[Running] python3 -u "/Users/censored/Python-Stock-Trade/Nikkei"
+Traceback (most recent call last):
+File "/Users/censored/Python-Stock-Trade/Nikkei", line 2, in <module>
+from bs4 import BeautifulSoup
+ModuleNotFoundError: No module named 'bs4'
+
+[Done] exited with code=1 in 0.326 seconds 
