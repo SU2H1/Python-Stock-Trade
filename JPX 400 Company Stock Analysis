@@ -11,32 +11,20 @@ from langdetect import detect
 def get_stock_codes_and_names():
     url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_400.html"
     
-    print(f"Fetching URL: {url}")
     response = requests.get(url)
-    
-    print(f"Response status code: {response.status_code}")
-    
     if response.status_code != 200:
         print(f"Failed to fetch the webpage. Status code: {response.status_code}")
         return []
 
     soup = BeautifulSoup(response.content, 'html.parser')
-    
     stock_table = soup.find('table', {'class': 'md-l-table-type01'})
-    
     if stock_table is None:
-        print("Could not find table with class 'md-l-table-type01'")
         all_tables = soup.find_all('table')
-        print(f"Number of tables found: {len(all_tables)}")
-        
         for table in all_tables:
             if table.find('tr'):
                 stock_table = table
-                print(f"Using table with classes: {stock_table.get('class', 'No class')}")
                 break
-        
         if stock_table is None:
-            print("Could not find any suitable table")
             return []
 
     stock_data = []
@@ -46,8 +34,6 @@ def get_stock_codes_and_names():
             stock_code = cells[0].text.strip()
             company_name = cells[1].text.strip()
             stock_data.append((stock_code, company_name))
-    
-    print(f"Found {len(stock_data)} stocks")
     return stock_data
 
 def scrape_nikkei_news(stock_number):
@@ -55,11 +41,7 @@ def scrape_nikkei_news(stock_number):
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
-    news_data = []
-    for item in news_items:
-        title = item.text.strip()
-        url = "https://www.nikkei.com" + item['href']
-        news_data.append({"title": title, "url": url})
+    news_data = [{"title": item.text.strip(), "url": "https://www.nikkei.com" + item['href']} for item in news_items]
     return news_data
 
 def scrape_yahoo_finance_news(stock_number):
@@ -83,12 +65,8 @@ def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
     except:
         lang = 'ja'  # Default to Japanese if detection fails
 
-    if lang == 'ja':
-        tokenizer = ja_tokenizer
-        model = ja_model
-    else:
-        tokenizer = en_tokenizer
-        model = en_model
+    tokenizer = ja_tokenizer if lang == 'ja' else en_tokenizer
+    model = ja_model if lang == 'ja' else en_model
 
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     outputs = model(**inputs)
@@ -121,13 +99,11 @@ def get_stock_data(stock_number):
     try:
         df = yf.download(ticker, start=start_date, end=end_date)
         if df.empty:
-            print("No data found for the specified stock number.")
             return None
         
         df = df.reset_index()
         df['Date'] = pd.to_datetime(df['Date'])
         stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
-        
         stock_data.sort(key=lambda x: x[0], reverse=True)
         return stock_data[:30]
     
@@ -155,7 +131,10 @@ def calculate_stock_trend(stock_data):
     else:
         return "Neutral"
 
-def get_action_recommendation(public_opinion, stock_trend, current_price):
+def get_action_recommendation(public_opinion, stock_trend, stock_price_data):
+    if not stock_price_data:
+        return "Insufficient data for recommendation"
+
     opinion_score = {
         "Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2
     }
@@ -165,11 +144,20 @@ def get_action_recommendation(public_opinion, stock_trend, current_price):
     
     total_score = opinion_score[public_opinion] + trend_score[stock_trend]
     
+    # Calculate average price and standard deviation
+    prices = [price for _, price in stock_price_data]
+    avg_price = np.mean(prices)
+    std_dev = np.std(prices)
+    
+    current_price = stock_price_data[0][1]  # Most recent price
+    
     if total_score >= 2:
-        target_price = current_price * 1.05  # 5% above current price
+        # Buy recommendation: Set target slightly below current price
+        target_price = max(current_price * 0.98, avg_price - 0.5 * std_dev)
         return f"Buy (Target: ¥{target_price:.2f})"
     elif total_score <= -2:
-        target_price = current_price * 1.05  # 5% above current price for selling
+        # Sell recommendation: Set target slightly above current price
+        target_price = min(current_price * 1.02, avg_price + 0.5 * std_dev)
         return f"Sell (Target: ¥{target_price:.2f})"
     else:
         return "Hold"
@@ -237,22 +225,21 @@ def interactive_results_display(stock_analysis):
             print("Invalid input. Please type 'continue', '#<rank>', '#buy', '#sell', '#hold', or 'exit'.")
 
 def main():
-    print("Fetching stock codes and company names from the website...")
     stock_data = get_stock_codes_and_names()
-    print(f"Found {len(stock_data)} stocks.")
-    
+    if not stock_data:
+        print("Failed to retrieve stock data. Please check your internet connection and try again.")
+        return
+
     ja_tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     
     en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
     en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-    
+
     stock_analysis = []
-    
+
     for stock_number, company_name in stock_data:
         try:
-            print(f"Analyzing {company_name} ({stock_number})...")
-            
             nikkei_news_data = scrape_nikkei_news(stock_number)
             yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
             
@@ -269,28 +256,26 @@ def main():
             current_stock_price = stock_price_data[0][1] if stock_price_data else None
             stock_trend = calculate_stock_trend(stock_price_data)
             
-            action = get_action_recommendation(overall_sentiment, stock_trend, current_stock_price) if current_stock_price else "N/A"
+            action = get_action_recommendation(overall_sentiment, stock_trend, stock_price_data) if stock_price_data else "Insufficient data"
             
             stock_analysis.append({
-                "company_name": company_name,
-                "stock_number": stock_number,
-                "current_stock_price": current_stock_price,
-                "nikkei_sentiment": nikkei_overall_sentiment,
-                "yahoo_sentiment": yahoo_finance_overall_sentiment,
-                "overall_sentiment": overall_sentiment,
-                "overall_sentiment_value": overall_sentiment_value,
-                "stock_trend": stock_trend,
-                "action": action,
-                "nikkei_news": [{"title": news['title'], "url": news['url']} for news in nikkei_news_data],
-                "yahoo_news": [{"title": news['title'], "url": news['url']} for news in yahoo_finance_news_data]
+                'stock_number': stock_number,
+                'company_name': company_name,
+                'current_stock_price': current_stock_price,
+                'nikkei_sentiment': nikkei_overall_sentiment,
+                'yahoo_sentiment': yahoo_finance_overall_sentiment,
+                'overall_sentiment': overall_sentiment,
+                'stock_trend': stock_trend,
+                'action': action,
+                'nikkei_news': nikkei_news_data,
+                'yahoo_news': yahoo_finance_news_data
             })
+            
+            print(f"Processed {company_name} ({stock_number})")
+        
         except Exception as e:
-            print(f"Error analyzing {stock_number}: {e}")
-    
-    # Sort stocks based on overall sentiment value (higher is better)
-    stock_analysis.sort(key=lambda x: x["overall_sentiment_value"], reverse=True)
-    
-    print("\nStock Analysis Results (Sorted from Best to Worst):")
+            print(f"Error processing {company_name} ({stock_number}): {str(e)}")
+
     interactive_results_display(stock_analysis)
 
 if __name__ == '__main__':
