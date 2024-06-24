@@ -295,11 +295,19 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
         price_change = (current_price - purchase_price) / purchase_price * 100
         
         if total_score > 0:
-            action = "Hold"
-            explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
+            if price_change > 0:
+                action = "Hold"
+                explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
+            else:
+                action = "Hold"
+                explanation = f"Positive outlook despite current loss. You're currently down {abs(price_change):.2f}%. Consider holding for potential recovery."
         elif total_score < 0:
-            action = "Consider Selling"
-            explanation = f"Negative outlook. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Consider selling to {'lock in profits' if price_change > 0 else 'minimize losses'}."
+            if price_change > 0:
+                action = "Consider Selling"
+                explanation = f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
+            else:
+                action = "Consider Selling"
+                explanation = f"Negative outlook. You're currently down {abs(price_change):.2f}%. Consider selling to minimize losses."
         else:
             action = "Hold and Monitor"
             explanation = f"Mixed signals. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Monitor the stock closely for changes in sentiment or market trends."
@@ -310,7 +318,7 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
         elif price_change < -20:
             explanation += " However, with significant losses, reassess your investment thesis."
     else:
-        # Logic for users who don't own the stock (similar to original function)
+        # Logic for users who don't own the stock
         if total_score > 0:
             target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
             action = f"Consider Buying (Target: ¥{target_price:.2f})"
