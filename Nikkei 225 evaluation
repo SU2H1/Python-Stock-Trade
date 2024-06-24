@@ -11,32 +11,20 @@ from langdetect import detect
 def get_stock_codes_and_names():
     url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_225.html"
     
-    print(f"Fetching URL: {url}")
     response = requests.get(url)
-    
-    print(f"Response status code: {response.status_code}")
-    
     if response.status_code != 200:
         print(f"Failed to fetch the webpage. Status code: {response.status_code}")
         return []
 
     soup = BeautifulSoup(response.content, 'html.parser')
-    
     stock_table = soup.find('table', {'class': 'md-l-table-type01'})
-    
     if stock_table is None:
-        print("Could not find table with class 'md-l-table-type01'")
         all_tables = soup.find_all('table')
-        print(f"Number of tables found: {len(all_tables)}")
-        
         for table in all_tables:
             if table.find('tr'):
                 stock_table = table
-                print(f"Using table with classes: {stock_table.get('class', 'No class')}")
                 break
-        
         if stock_table is None:
-            print("Could not find any suitable table")
             return []
 
     stock_data = []
@@ -46,8 +34,6 @@ def get_stock_codes_and_names():
             stock_code = cells[0].text.strip()
             company_name = cells[1].text.strip()
             stock_data.append((stock_code, company_name))
-    
-    print(f"Found {len(stock_data)} stocks")
     return stock_data
 
 def scrape_nikkei_news(stock_number):
@@ -55,11 +41,7 @@ def scrape_nikkei_news(stock_number):
     response = requests.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
-    news_data = []
-    for item in news_items:
-        title = item.text.strip()
-        url = "https://www.nikkei.com" + item['href']
-        news_data.append({"title": title, "url": url})
+    news_data = [{"title": item.text.strip(), "url": "https://www.nikkei.com" + item['href']} for item in news_items]
     return news_data
 
 def scrape_yahoo_finance_news(stock_number):
@@ -71,12 +53,12 @@ def scrape_yahoo_finance_news(stock_number):
     news_data = []
     for item in news_items:
         title = item.text.strip()
-        href = item['href']
-        if href.startswith("https://finance.yahoo.co.jp"):
-            href = href[len("https://finance.yahoo.co.jp"):]
-        url = "https://finance.yahoo.co.jp" + href
-        news_data.append({"title": title, "url": url})
+        article_url = item['href']
+        if not article_url.startswith('http'):
+            article_url = "https://finance.yahoo.co.jp" + article_url
+        news_data.append({"title": title, "url": article_url})
     return news_data
+
 
 def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
     try:
@@ -84,12 +66,8 @@ def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
     except:
         lang = 'ja'  # Default to Japanese if detection fails
 
-    if lang == 'ja':
-        tokenizer = ja_tokenizer
-        model = ja_model
-    else:
-        tokenizer = en_tokenizer
-        model = en_model
+    tokenizer = ja_tokenizer if lang == 'ja' else en_tokenizer
+    model = ja_model if lang == 'ja' else en_model
 
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     outputs = model(**inputs)
@@ -122,13 +100,11 @@ def get_stock_data(stock_number):
     try:
         df = yf.download(ticker, start=start_date, end=end_date)
         if df.empty:
-            print("No data found for the specified stock number.")
             return None
         
         df = df.reset_index()
         df['Date'] = pd.to_datetime(df['Date'])
         stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
-        
         stock_data.sort(key=lambda x: x[0], reverse=True)
         return stock_data[:30]
     
@@ -170,7 +146,7 @@ def get_action_recommendation(public_opinion, stock_trend, current_price):
         target_price = current_price * 1.05  # 5% above current price
         return f"Buy (Target: ¥{target_price:.2f})"
     elif total_score <= -2:
-        target_price = current_price * 1.05  # 5% above current price for selling
+        target_price = current_price * 0.95  # 5% below current price for selling
         return f"Sell (Target: ¥{target_price:.2f})"
     else:
         return "Hold"
