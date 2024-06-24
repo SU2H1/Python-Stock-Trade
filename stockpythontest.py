@@ -216,33 +216,61 @@ def identify_pattern(stock_data):
         elif is_increasing(first_third) and is_decreasing(last_third):
             return "Rounding Top"
     
-    # Cup and Handle
-    if n >= 20:
-        cup = prices[:15]
-        handle = prices[15:]
-        if is_decreasing(cup[:7]) and is_increasing(cup[7:]) and is_decreasing(handle):
-            return "Cup and Handle"
+    return "No specific pattern identified"
+
+def get_suggested_price(stock_number):
+    ticker = f"{stock_number}.T"
+    stock = yf.Ticker(ticker)
+    history = stock.history(period="1y")
     
-    return "No Clear Pattern"
+    if history.empty:
+        return None, None
+    
+    current_price = history['Close'][-1]
+    avg_price = history['Close'].mean()
+    max_price = history['Close'].max()
+    min_price = history['Close'].min()
+    
+    buy_price = (avg_price + min_price) / 2
+    sell_price = (avg_price + max_price) / 2
+    
+    return round(buy_price, 2), round(sell_price, 2)
 
-def get_suggested_price(current_price, action, stock_data):
-    if not stock_data:
-        return None
-
-    prices = [price for _, price in stock_data]
-    avg_price = sum(prices) / len(prices)
-    std_dev = (sum((price - avg_price) ** 2 for price in prices) / len(prices)) ** 0.5
-
-    if action == "Buy":
-        # Suggest a price slightly below the current price, but not lower than 1 standard deviation below the average
-        suggested_price = max(current_price * 0.98, avg_price - std_dev)
-    elif action == "Sell":
-        # Suggest a price slightly above the current price, but not higher than 1 standard deviation above the average
-        suggested_price = min(current_price * 1.02, avg_price + std_dev)
-    else:
-        return None
-
-    return round(suggested_price, 2)
+# Main function to get all the information
+def get_stock_info(stock_number):
+    company_name = get_company_name(stock_number)
+    current_stock_price = get_current_stock_price(stock_number)
+    
+    ja_tokenizer = AutoTokenizer.from_pretrained("daigo/bert-base-japanese-sentiment")
+    ja_model = AutoModelForSequenceClassification.from_pretrained("daigo/bert-base-japanese-sentiment")
+    en_tokenizer = AutoTokenizer.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+    en_model = AutoModelForSequenceClassification.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+    
+    news_data = scrape_nikkei_news(stock_number) + scrape_yahoo_finance_news(stock_number)
+    
+    news_sentiments = []
+    for news in news_data:
+        sentiment_score = analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model)
+        sentiment_text = sentiment_to_text(sentiment_score)
+        news_sentiments.append({
+            'title': news['title'],
+            'url': news['url'],
+            'sentiment': sentiment_text
+        })
+    
+    stock_data = get_stock_data(stock_number)
+    pattern = identify_pattern(stock_data)
+    
+    buy_price, sell_price = get_suggested_price(stock_number)
+    
+    return {
+        'company_name': company_name,
+        'current_stock_price': current_stock_price,
+        'news': news_sentiments,
+        'pattern': pattern,
+        'buy_price': buy_price,
+        'sell_price': sell_price
+    }
 
 def main():
     while True:
