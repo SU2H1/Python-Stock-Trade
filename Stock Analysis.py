@@ -274,6 +274,41 @@ def get_stock_info(stock_number):
         'sell_price': sell_price
     }
 
+def get_action_recommendation(public_opinion, stock_trend, stock_price_data, purchase_price=None):
+    if not stock_price_data:
+        return "Insufficient data for recommendation"
+
+    opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
+    trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
+    
+    total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+    
+    prices = [price for _, price in stock_price_data]
+    current_price = prices[0]
+    avg_price = np.mean(prices)
+    std_dev = np.std(prices)
+    
+    if total_score > 0:
+        target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
+        action = f"Buy (Target: ¥{target_price:.2f})"
+        explanation = "Positive outlook. Consider buying near the suggested target price."
+    elif total_score < 0:
+        target_price = min(current_price * 1.01, avg_price + 0.5 * std_dev)
+        action = f"Sell (Target: ¥{target_price:.2f})"
+        explanation = "Negative outlook. Consider selling near the suggested target price."
+    else:
+        action = "Hold"
+        explanation = "Mixed signals. Monitor the stock closely for changes in sentiment or market trends."
+
+    if purchase_price:
+        price_change = (current_price - purchase_price) / purchase_price * 100
+        if price_change < -5 and action.startswith("Sell"):
+            explanation += f" Caution: Selling would result in a {abs(price_change):.2f}% loss from your purchase price."
+        elif price_change > 5 and action == "Hold":
+            explanation += f" Consider taking profits, current gain: {price_change:.2f}%."
+
+    return f"{action}\nExplanation: {explanation}"
+
 def main():
     while True:
         stock_input = input("Enter the stock exchange number (e.g., 3092 for ZOZO): ").strip().upper()
@@ -326,7 +361,6 @@ def main():
         nikkei_overall_sentiment = get_overall_sentiment(nikkei_sentiments)
         yahoo_finance_overall_sentiment = get_overall_sentiment(yahoo_finance_sentiments)
         
-        # Calculate overall sentiment as (Yahoo article value + Nikkei article rating value) / 2
         if nikkei_sentiments and yahoo_finance_sentiments:
             overall_sentiment_value = (sum(nikkei_sentiments) / len(nikkei_sentiments) + sum(yahoo_finance_sentiments) / len(yahoo_finance_sentiments)) / 2
             overall_sentiment = sentiment_to_text(overall_sentiment_value)
@@ -355,37 +389,12 @@ def main():
                 print("Price Difference: N/A")
             
             print(f"\nIdentified 30-Day Pattern: {matched_pattern}")
-            
             print(f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}")
             print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
             print(f"Overall Sentiment: {overall_sentiment}")
             
-            # Updated decision logic with price suggestions
-            if overall_sentiment in ["Very Positive", "Positive"]:
-                if purchase_price is None or current_stock_price < purchase_price:
-                    decision = "Buy"
-                    suggested_price = get_suggested_price(current_stock_price, "Buy", stock_data)
-                    if suggested_price:
-                        decision += f" (Suggested buy price: ¥{suggested_price})"
-                else:
-                    decision = "Hold (Consider taking profits)"
-            elif overall_sentiment in ["Very Negative", "Negative"]:
-                if purchase_price is None or current_stock_price > purchase_price:
-                    decision = "Sell"
-                    suggested_price = get_suggested_price(current_stock_price, "Sell", stock_data)
-                    if suggested_price:
-                        decision += f" (Suggested sell price: ¥{suggested_price})"
-                else:
-                    decision = "Hold (Consider cutting losses)"
-            else:  # Neutral sentiment
-                if purchase_price is None:
-                    decision = "Hold (Insufficient data for strong recommendation)"
-                elif current_stock_price > purchase_price:
-                    decision = "Hold (Consider taking small profits)"
-                else:
-                    decision = "Hold (Monitor closely)"
-            
-            print(f"\nRecommended Action: {decision}")
+            recommendation = get_action_recommendation(overall_sentiment, matched_pattern, stock_data, purchase_price)
+            print(f"\nRecommended Action: {recommendation}")
             
             while True:
                 source_request = input("\nEnter a news source name to see detailed sentiment analysis (or 'quit' to exit): ")
