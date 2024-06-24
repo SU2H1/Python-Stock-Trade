@@ -58,8 +58,10 @@ def scrape_yahoo_finance_news(stock_number):
     news_data = []
     for item in news_items:
         title = item.text.strip()
-        url = "https://finance.yahoo.co.jp" + item['href']
-        news_data.append({"title": title, "url": url})
+        article_url = item['href']
+        if not article_url.startswith('http'):
+            article_url = "https://finance.yahoo.co.jp" + article_url
+        news_data.append({"title": title, "url": article_url})
     return news_data
 
 def analyze_sentiment(text, ja_tokenizer, ja_model, en_tokenizer, en_model):
