@@ -9,21 +9,21 @@ import yfinance as yf
 from langdetect import detect
 
 def get_stock_codes_and_names():
-    url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionI    
+    url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_400.html"
     print(f"Fetching URL: {url}")
     response = requests.get(url)
     
-    print(f"Resp    
+    print(f"Response status code: {response.status_code}")
     if response.status_code != 200:
         print(f"Failed to fetch the webpage. Status code: {response.status_code}")
         return []
 
-    soup = BeautifulSoup(response.content, 'htm    
+    soup = BeautifulSoup(response.content, 'html.parser')
     # Try to find the table with the original class
     stock_table = soup.find('table', {'class': 'md-l-table-type01'})
     
     if stock_table is None:
-        print("Could not find table with cl        # Try to find any table in the HTML
+        print("Could not find table with class 'md-l-table-type01'")
         all_tables = soup.find_all('table')
         print(f"Number of tables found: {len(all_tables)}")
         
