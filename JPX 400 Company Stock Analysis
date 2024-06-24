@@ -10,7 +10,6 @@ from langdetect import detect
 
 def get_stock_codes_and_names():
     url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_400.html"
-    
     response = requests.get(url)
     if response.status_code != 200:
         print(f"Failed to fetch the webpage. Status code: {response.status_code}")
@@ -131,64 +130,63 @@ def calculate_stock_trend(stock_data):
     else:
         return "Neutral"
 
-def get_action_recommendation(public_opinion, stock_trend, stock_price_data):
-    if not stock_price_data:
-        return "Insufficient data for recommendation"
-
-    opinion_score = {
-        "Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2
-    }
-    trend_score = {
-        "Strong Uptrend": 2, "Uptrend": 1, "Neutral": 0, "Downtrend": -1, "Strong Downtrend": -2
-    }
-    
-    total_score = opinion_score[public_opinion] + trend_score[stock_trend]
-    
-    # Calculate average price and standard deviation
-    prices = [price for _, price in stock_price_data]
-    avg_price = np.mean(prices)
-    std_dev = np.std(prices)
-    
-    current_price = stock_price_data[0][1]  # Most recent price
-    
-    if total_score >= 2:
-        # Buy recommendation: Set target slightly below current price
-        target_price = max(current_price * 0.98, avg_price - 0.5 * std_dev)
-        return f"Buy (Target: ¥{target_price:.2f})"
-    elif total_score <= -2:
-        # Sell recommendation: Set target slightly above current price
-        target_price = min(current_price * 1.02, avg_price + 0.5 * std_dev)
-        return f"Sell (Target: ¥{target_price:.2f})"
-    else:
-        return "Hold"
-
 def display_stock_info(stock, rank):
     print(f"{rank}. {stock['company_name']} ({stock['stock_number']}):")
     print(f"   Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "   Current Price: N/A")
     print(f"   Nikkei's Impression: {stock['nikkei_sentiment']}")
     print(f"   Yahoo's Impression: {stock['yahoo_sentiment']}")
-    print(f"   Overall Public Opinion: {stock['overall_sentiment']}")
+    print(f"   Overall Sentiment: {stock['overall_sentiment']}")
     print(f"   Stock Trend: {stock['stock_trend']}")
-    print(f"   Action: {stock['action']}")
+    print(f"   Recommendation: {stock['action_recommendation']}")
     print()
 
-def display_detailed_analysis(stock):
-    print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
-    print(f"Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "Current Price: N/A")
-    print(f"Nikkei's Impression: {stock['nikkei_sentiment']}")
-    print(f"Yahoo's Impression: {stock['yahoo_sentiment']}")
-    print(f"Overall Public Opinion: {stock['overall_sentiment']}")
-    print(f"Stock Trend: {stock['stock_trend']}")
-    print(f"Action: {stock['action']}")
-    print("\nNikkei News:")
-    for i, news in enumerate(stock['nikkei_news'], 1):
-        print(f"  {i}. {news['title']}")
-        print(f"     URL: {news['url']}")
-    print("\nYahoo Finance News:")
-    for i, news in enumerate(stock['yahoo_news'], 1):
-        print(f"  {i}. {news['title']}")
-        print(f"     URL: {news['url']}")
-    print()
+def get_action_recommendation(public_opinion, stock_trend, stock_price_data, purchase_price=None):
+    if not stock_price_data:
+        return "Insufficient data for recommendation"
+
+    opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
+    trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
+    
+    total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+    
+    prices = [price for _, price in stock_price_data]
+    current_price = prices[0]
+    avg_price = np.mean(prices)
+    std_dev = np.std(prices)
+    
+    owns_stock = purchase_price is not None
+    
+    if owns_stock:
+        price_change = (current_price - purchase_price) / purchase_price * 100
+        
+        if total_score > 0:
+            action = "Hold"
+            explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
+        elif total_score < 0:
+            action = "Consider Selling"
+            explanation = f"Negative outlook. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Consider selling to {'lock in profits' if price_change > 0 else 'minimize losses'}."
+        else:
+            action = "Hold and Monitor"
+            explanation = f"Mixed signals. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Monitor the stock closely for changes in sentiment or market trends."
+        
+        if price_change > 20:
+            explanation += " However, with significant gains, consider taking partial profits."
+        elif price_change < -20:
+            explanation += " However, with significant losses, reassess your investment thesis."
+    else:
+        if total_score > 0:
+            target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
+            action = f"Consider Buying (Target: ¥{target_price:.2f})"
+            explanation = "Positive outlook. Consider buying near the suggested target price."
+        elif total_score < 0:
+            action = "Hold Off"
+            explanation = "Negative outlook. It might be better to wait for a more favorable entry point."
+        else:
+            action = "Monitor"
+            explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
+
+    return f"{action}\nExplanation: {explanation}"
+
 
 def interactive_results_display(stock_analysis):
     current_index = 0
@@ -199,16 +197,19 @@ def interactive_results_display(stock_analysis):
         if current_index + 10 >= len(stock_analysis):
             print("End of list reached.")
         
-        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#buy', '#sell', or '#hold' to see top stocks for each action, or 'exit' to quit: ").strip().lower()
+        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, or 'exit' to quit: ").strip().lower()
         
         if user_input == 'continue' and current_index + 10 < len(stock_analysis):
             current_index += 10
         elif user_input.startswith('#'):
-            if user_input[1:] in ['buy', 'sell', 'hold']:
-                action = user_input[1:].capitalize()
-                top_stocks = [s for s in stock_analysis if s['action'].startswith(action)][:5]
-                print(f"\nTop 5 stocks to {action}:")
-                for i, stock in enumerate(top_stocks, 1):
+            if user_input[1:] == 'recommend':
+                recommended_stocks = sorted(
+                    [s for s in stock_analysis if 'Buy' in s['action_recommendation'] or 'Hold' in s['action_recommendation']],
+                    key=lambda x: x['current_stock_price'],
+                    reverse=True
+                )[:5]
+                print("\nTop 5 Recommended Stocks:")
+                for i, stock in enumerate(recommended_stocks, 1):
                     display_stock_info(stock, i)
             else:
                 try:
@@ -222,7 +223,29 @@ def interactive_results_display(stock_analysis):
         elif user_input == 'exit':
             break
         else:
-            print("Invalid input. Please type 'continue', '#<rank>', '#buy', '#sell', '#hold', or 'exit'.")
+            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', or 'exit'.")
+
+def display_detailed_analysis(stock):
+    print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
+    print(f"Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "Current Price: N/A")
+    if stock['purchase_price']:
+        print(f"Purchase Price: ¥{stock['purchase_price']:.2f}")
+        price_change = ((stock['current_stock_price'] - stock['purchase_price']) / stock['purchase_price']) * 100
+        print(f"Price Change: {price_change:.2f}%")
+    print(f"Nikkei's Impression: {stock['nikkei_sentiment']}")
+    print(f"Yahoo's Impression: {stock['yahoo_sentiment']}")
+    print(f"Overall Sentiment: {stock['overall_sentiment']}")
+    print(f"Stock Trend: {stock['stock_trend']}")
+    print(f"Recommendation: {stock['action_recommendation']}")
+    print("\nNikkei News:")
+    for i, news in enumerate(stock['nikkei_news'], 1):
+        print(f"  {i}. {news['title']}")
+        print(f"     URL: {news['url']}")
+    print("\nYahoo Finance News:")
+    for i, news in enumerate(stock['yahoo_news'], 1):
+        print(f"  {i}. {news['title']}")
+        print(f"     URL: {news['url']}")
+    print()
 
 def main():
     stock_data = get_stock_codes_and_names()
@@ -240,6 +263,8 @@ def main():
 
     for stock_number, company_name in stock_data:
         try:
+            print(f"Processing {company_name} ({stock_number})...")
+            
             nikkei_news_data = scrape_nikkei_news(stock_number)
             yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
             
@@ -256,7 +281,7 @@ def main():
             current_stock_price = stock_price_data[0][1] if stock_price_data else None
             stock_trend = calculate_stock_trend(stock_price_data)
             
-            action = get_action_recommendation(overall_sentiment, stock_trend, stock_price_data) if stock_price_data else "Insufficient data"
+            action_recommendation = get_action_recommendation(overall_sentiment, stock_trend, stock_price_data)
             
             stock_analysis.append({
                 'stock_number': stock_number,
@@ -266,7 +291,7 @@ def main():
                 'yahoo_sentiment': yahoo_finance_overall_sentiment,
                 'overall_sentiment': overall_sentiment,
                 'stock_trend': stock_trend,
-                'action': action,
+                'action_recommendation': action_recommendation,
                 'nikkei_news': nikkei_news_data,
                 'yahoo_news': yahoo_finance_news_data
             })
