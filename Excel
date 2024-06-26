@@ -211,6 +211,7 @@ def create_excel_report(stock_analysis):
     row_headers = [
         "Stock Code",
         f"{datetime.now().date()} Stock Price",
+        "Previous Day Stock Price",
         "Compared to day before",
         "Nikkei Perception",
         "Yahoo Finance Perception",
@@ -223,10 +224,18 @@ def create_excel_report(stock_analysis):
         cell.alignment = Alignment(horizontal='left', vertical='center')
         ws.row_dimensions[row].height = 20
 
+    def color_sentiment(cell, sentiment):
+        if sentiment == "Positive" or sentiment == "Very Positive":
+            cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
+        elif sentiment == "Negative" or sentiment == "Very Negative":
+            cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+        elif sentiment == "Neutral":
+            cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+
     # Populate data
     for col, stock in enumerate(stock_analysis, start=2):
         current_price = stock['current_stock_price']
-        previous_price = stock['stock_price_data'][1][1] if len(stock['stock_price_data']) > 1 else current_price
+        previous_price = stock['stock_price_data'][1][1] if len(stock['stock_price_data']) > 1 else None
         
         if current_price is not None and previous_price is not None:
             price_change_percent = ((current_price - previous_price) / previous_price) * 100
@@ -235,8 +244,9 @@ def create_excel_report(stock_analysis):
 
         ws.cell(row=2, column=col, value=stock['stock_number'])
         ws.cell(row=3, column=col, value=current_price if current_price is not None else "N/A")
+        ws.cell(row=4, column=col, value=previous_price if previous_price is not None else "N/A")
         
-        change_cell = ws.cell(row=4, column=col, value=f"{price_change_percent:.2f}%" if price_change_percent != "N/A" else price_change_percent)
+        change_cell = ws.cell(row=5, column=col, value=f"{price_change_percent:.2f}%" if price_change_percent != "N/A" else price_change_percent)
         if price_change_percent != "N/A":
             if price_change_percent > 0:
                 change_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
@@ -245,11 +255,16 @@ def create_excel_report(stock_analysis):
             else:
                 change_cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
         
-        ws.cell(row=5, column=col, value=stock['nikkei_sentiment'])
-        ws.cell(row=6, column=col, value=stock['yahoo_sentiment'])
-        ws.cell(row=7, column=col, value=stock['overall_sentiment'])
+        nikkei_cell = ws.cell(row=6, column=col, value=stock['nikkei_sentiment'])
+        color_sentiment(nikkei_cell, stock['nikkei_sentiment'])
         
-        action_cell = ws.cell(row=8, column=col, value=stock['action_recommendation'].split('\n')[0])  # Only the action, not the explanation
+        yahoo_cell = ws.cell(row=7, column=col, value=stock['yahoo_sentiment'])
+        color_sentiment(yahoo_cell, stock['yahoo_sentiment'])
+        
+        overall_cell = ws.cell(row=8, column=col, value=stock['overall_sentiment'])
+        color_sentiment(overall_cell, stock['overall_sentiment'])
+        
+        action_cell = ws.cell(row=9, column=col, value=stock['action_recommendation'].split('\n')[0])  # Only the action, not the explanation
         if "Buy" in action_cell.value:
             action_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
 
@@ -257,9 +272,6 @@ def create_excel_report(stock_analysis):
     filename = f"stock_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
     wb.save(filename)
     print(f"Excel report saved as {filename}")
-    # Save the workbook
-    filename = f"stock_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    wb.save(filename)
 
 def main():
     stock_data = get_stock_codes_and_names()
