@@ -260,7 +260,6 @@ def create_excel_report(stock_analysis):
     # Save the workbook
     filename = f"stock_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
     wb.save(filename)
-    print(f"Excel report saved as {filename}")
 
 def main():
     stock_data = get_stock_codes_and_names()
