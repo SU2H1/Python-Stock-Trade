@@ -10,6 +10,7 @@ from langdetect import detect
 
 def get_stock_codes_and_names():
     url = "https://site2.sbisec.co.jp/ETGate/?OutSide=on&_ControlID=WPLETmgR001Control&_PageID=WPLETmgR001Mdtl20&_DataStoreID=DSWPLETmgR001Control&_ActionID=DefaultAID&getFlg=on&burl=search_market&cat1=market&cat2=none&dir=info&file=market_meigara_400.html"
+    
     response = requests.get(url)
     if response.status_code != 200:
         print(f"Failed to fetch the webpage. Status code: {response.status_code}")
@@ -197,7 +198,7 @@ def interactive_results_display(stock_analysis):
         if current_index + 10 >= len(stock_analysis):
             print("End of list reached.")
         
-        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, or 'exit' to quit: ").strip().lower()
+        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, '#buy', '#sell', or '#hold' for top 10 recommendations, or 'exit' to quit: ").strip().lower()
         
         if user_input == 'continue' and current_index + 10 < len(stock_analysis):
             current_index += 10
@@ -211,6 +212,13 @@ def interactive_results_display(stock_analysis):
                 print("\nTop 5 Recommended Stocks:")
                 for i, stock in enumerate(recommended_stocks, 1):
                     display_stock_info(stock, i)
+            elif user_input in ['#buy', '#sell', '#hold']:
+                action = user_input[1:].capitalize()
+                filtered_stocks = [s for s in stock_analysis if action in s['action_recommendation']]
+                sorted_stocks = sorted(filtered_stocks, key=lambda x: x['current_stock_price'], reverse=True)[:10]
+                print(f"\nTop 10 {action} Recommendations:")
+                for i, stock in enumerate(sorted_stocks, 1):
+                    display_stock_info(stock, i)
             else:
                 try:
                     rank = int(user_input[1:]) - 1
@@ -223,7 +231,8 @@ def interactive_results_display(stock_analysis):
         elif user_input == 'exit':
             break
         else:
-            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', or 'exit'.")
+            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', '#buy', '#sell', '#hold', or 'exit'.")
+
 
 def display_detailed_analysis(stock):
     print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
@@ -253,6 +262,9 @@ def main():
         print("Failed to retrieve stock data. Please check your internet connection and try again.")
         return
 
+    total_stocks = len(stock_data)
+    print(f"Total stocks to process: {total_stocks}")
+
     ja_tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
     
@@ -261,9 +273,9 @@ def main():
 
     stock_analysis = []
 
-    for stock_number, company_name in stock_data:
+    for index, (stock_number, company_name) in enumerate(stock_data, 1):
         try:
-            print(f"Processing {company_name} ({stock_number})...")
+            print(f"Processing: {company_name} ({stock_number}) - {index}/{total_stocks}", end='\r')
             
             nikkei_news_data = scrape_nikkei_news(stock_number)
             yahoo_finance_news_data = scrape_yahoo_finance_news(stock_number)
@@ -295,12 +307,11 @@ def main():
                 'nikkei_news': nikkei_news_data,
                 'yahoo_news': yahoo_finance_news_data
             })
-            
-            print(f"Processed {company_name} ({stock_number})")
         
         except Exception as e:
-            print(f"Error processing {company_name} ({stock_number}): {str(e)}")
+            print(f"\nError processing {company_name} ({stock_number}): {str(e)}")
 
+    print("\nAll stocks processed.")
     interactive_results_display(stock_analysis)
 
 if __name__ == '__main__':
