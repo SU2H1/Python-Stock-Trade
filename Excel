@@ -8,6 +8,8 @@ import pandas as pd
 import yfinance as yf
 from langdetect import detect
 import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 import os
 import logging
 
@@ -198,36 +200,73 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
     return f"{action}\nExplanation: {explanation}"
 
 def export_to_excel(stock_analysis, filename="stock_analysis_detailed.xlsx"):
-    # Save to Documents folder
     documents_folder = os.path.join(os.path.expanduser('~'), 'Documents')
     file_path = os.path.join(documents_folder, filename)
     
-    df = pd.DataFrame([
-        {
-            "Date": datetime.now().strftime("%Y-%m-%d"),
-            "Company Name": stock["company_name"],
-            "Stock Number": stock["stock_number"],
-            "Current Stock Price": f"¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "N/A",
-            "Previous Day Price": f"¥{stock['previous_day_price']:.2f}" if stock['previous_day_price'] else "N/A",
-            "Price Change": f"{stock['price_change']:.2f}%" if stock['price_change'] is not None else "N/A",
-            "Nikkei's Impression": stock["nikkei_sentiment"],
-            "Yahoo's Impression": stock["yahoo_sentiment"],
-            "Overall Sentiment": stock["overall_sentiment"],
-            "Stock Trend": stock["stock_trend"],
-            "Recommended Action": stock["action_recommendation"].split('\n')[0],  # Get only the action, not the explanation
-            "Recommendation Explanation": stock["action_recommendation"].split('\n')[1] if len(stock["action_recommendation"].split('\n')) > 1 else ""
-        }
-        for stock in stock_analysis
-    ])
-    
-    df.to_excel(file_path, index=False)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Stock Analysis"
+
+    # Define styles
+    header_fill = PatternFill(start_color="B8CCE4", end_color="B8CCE4", fill_type="solid")
+    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    # Get current date
+    current_date = datetime.now().strftime("%m/%d")
+
+    # Write headers
+    headers = [
+        "企業名", "企業コード", f"{current_date} 株価", f"{current_date} 損益",
+        "Nikkei", "Yahoo Finance", "Action"
+    ]
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+    # Write data
+    for row, stock in enumerate(stock_analysis, start=2):
+        ws.cell(row=row, column=1, value=stock["company_name"])
+        ws.cell(row=row, column=2, value=stock["stock_number"])
+        ws.cell(row=row, column=3, value=stock["current_stock_price"])
+        
+        # Calculate profit/loss for 100 shares
+        if stock["price_change"] is not None:
+            profit_loss = (stock["price_change"] / 100) * stock["current_stock_price"] * 100
+            ws.cell(row=row, column=4, value=profit_loss)
+        else:
+            ws.cell(row=row, column=4, value="N/A")
+        
+        ws.cell(row=row, column=5, value=stock["nikkei_sentiment"])
+        ws.cell(row=row, column=6, value=stock["yahoo_sentiment"])
+        ws.cell(row=row, column=7, value=stock["action_recommendation"].split('\n')[0])
+
+        # Color coding
+        for col in range(1, 8):
+            cell = ws.cell(row=row, column=col)
+            cell.border = border
+            if col in [4, 5, 6]:  # Columns for profit/loss and sentiment
+                if "Positive" in str(cell.value) or (col == 4 and cell.value > 0):
+                    cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                elif "Negative" in str(cell.value) or (col == 4 and cell.value < 0):
+                    cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                elif "Neutral" in str(cell.value) or (col == 4 and cell.value == 0):
+                    cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+    # Adjust column widths
+    for col in range(1, 8):
+        ws.column_dimensions[get_column_letter(col)].width = 20
+
+    wb.save(file_path)
     logger.info(f"Excel file has been created at: {file_path}")
 
 def main():
     try:
         stock_data = get_stock_codes_and_names()
         if not stock_data:
-            logger.error            return
+            logger.error("Failed to retrieve stock data. Please check your internet connection and try again.")
+            return
 
         total_stocks = len(stock_data)
         logger.info(f"Total stocks to process: {total_stocks}")
@@ -238,7 +277,8 @@ def main():
 
         logger.info("Loading English sentiment analysis model...")
         en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-        en_model = AutoModelForSequenceClassification.from_pretrained("disti
+        en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+
         stock_analysis = []
 
         for index, (stock_number, company_name) in enumerate(stock_data, 1):
