@@ -113,7 +113,7 @@ def calculate_average_sentiment(sentiments):
 def get_stock_data(stock_number):
     ticker = f"{stock_number}.T"
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=30)
+    start_date = end_date - timedelta(days=31)  # Get one extra day for previous day comparison
     
     try:
         df = yf.download(ticker, start=start_date, end=end_date)
@@ -124,7 +124,7 @@ def get_stock_data(stock_number):
         df['Date'] = pd.to_datetime(df['Date'])
         stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
         stock_data.sort(key=lambda x: x[0], reverse=True)
-        return stock_data[:30]
+        return stock_data[:31]  # Return 31 days of data
     
     except Exception as e:
         logger.error(f"Error retrieving stock data: {e}")
@@ -197,17 +197,25 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
 
     return f"{action}\nExplanation: {explanation}"
 
-def export_to_excel(stock_analysis, filename="stock_analysis.xlsx"):
+def export_to_excel(stock_analysis, filename="stock_analysis_detailed.xlsx"):
     # Save to Documents folder
     documents_folder = os.path.join(os.path.expanduser('~'), 'Documents')
     file_path = os.path.join(documents_folder, filename)
     
     df = pd.DataFrame([
         {
+            "Date": datetime.now().strftime("%Y-%m-%d"),
             "Company Name": stock["company_name"],
             "Stock Number": stock["stock_number"],
             "Current Stock Price": f"¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "N/A",
-            "Recommended Action": stock["action_recommendation"].split('\n')[0]  # Get only the action, not the explanation
+            "Previous Day Price": f"¥{stock['previous_day_price']:.2f}" if stock['previous_day_price'] else "N/A",
+            "Price Change": f"{stock['price_change']:.2f}%" if stock['price_change'] is not None else "N/A",
+            "Nikkei's Impression": stock["nikkei_sentiment"],
+            "Yahoo's Impression": stock["yahoo_sentiment"],
+            "Overall Sentiment": stock["overall_sentiment"],
+            "Stock Trend": stock["stock_trend"],
+            "Recommended Action": stock["action_recommendation"].split('\n')[0],  # Get only the action, not the explanation
+            "Recommendation Explanation": stock["action_recommendation"].split('\n')[1] if len(stock["action_recommendation"].split('\n')) > 1 else ""
         }
         for stock in stock_analysis
     ])
@@ -219,8 +227,7 @@ def main():
     try:
         stock_data = get_stock_codes_and_names()
         if not stock_data:
-            logger.error("Failed to retrieve stock data. Please check your internet connection and try again.")
-            return
+            logger.error            return
 
         total_stocks = len(stock_data)
         logger.info(f"Total stocks to process: {total_stocks}")
@@ -231,8 +238,7 @@ def main():
 
         logger.info("Loading English sentiment analysis model...")
         en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-        en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-
+        en_model = AutoModelForSequenceClassification.from_pretrained("disti
         stock_analysis = []
 
         for index, (stock_number, company_name) in enumerate(stock_data, 1):
@@ -253,6 +259,8 @@ def main():
                 
                 stock_price_data = get_stock_data(stock_number)
                 current_stock_price = stock_price_data[0][1] if stock_price_data else None
+                previous_day_price = stock_price_data[1][1] if stock_price_data and len(stock_price_data) > 1 else None
+                price_change = ((current_stock_price - previous_day_price) / previous_day_price * 100) if current_stock_price and previous_day_price else None
                 stock_trend = calculate_stock_trend(stock_price_data)
                 
                 action_recommendation = get_action_recommendation(overall_sentiment, stock_trend, stock_price_data)
@@ -261,6 +269,8 @@ def main():
                     'stock_number': stock_number,
                     'company_name': company_name,
                     'current_stock_price': current_stock_price,
+                    'previous_day_price': previous_day_price,
+                    'price_change': price_change,
                     'nikkei_sentiment': nikkei_overall_sentiment,
                     'yahoo_sentiment': yahoo_finance_overall_sentiment,
                     'overall_sentiment': overall_sentiment,
