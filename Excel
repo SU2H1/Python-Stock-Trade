@@ -8,7 +8,7 @@ import pandas as pd
 import yfinance as yf
 from langdetect import detect
 import openpyxl
-from openpyxl.styles import Font, Alignment
+from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
 def get_stock_codes_and_names():
@@ -181,8 +181,19 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
 
     return f"{action}\nExplanation: {explanation}"
 
-def calculate_profit(current_price, previous_price, num_stocks=100):
-    return (current_price - previous_price) * num_stocks
+def get_yahoo_finance_price(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    price_element = soup.find('span', class_='_3rXWJKZF')
+    if price_element:
+        price_text = price_element.text.replace(',', '')
+        try:
+            return int(float(price_text))
+        except ValueError:
+            print(f"Warning: Unable to convert price to integer for stock {stock_number}: {price_text}")
+            return None
+    return None
 
 def create_excel_report(stock_analysis):
     wb = openpyxl.Workbook()
@@ -200,10 +211,11 @@ def create_excel_report(stock_analysis):
     row_headers = [
         "Stock Code",
         f"{datetime.now().date()} Stock Price",
-        f"{datetime.now().date()} Profit (100 stocks)",
+        "Compared to day before",
         "Nikkei Perception",
         "Yahoo Finance Perception",
-        "Overall Perception"
+        "Overall Perception",
+        "Action"
     ]
     for row, header in enumerate(row_headers, start=2):
         cell = ws.cell(row=row, column=1, value=header)
@@ -215,91 +227,40 @@ def create_excel_report(stock_analysis):
     for col, stock in enumerate(stock_analysis, start=2):
         current_price = stock['current_stock_price']
         previous_price = stock['stock_price_data'][1][1] if len(stock['stock_price_data']) > 1 else current_price
-        profit = calculate_profit(current_price, previous_price) if current_price and previous_price else "N/A"
+        
+        if current_price is not None and previous_price is not None:
+            price_change_percent = ((current_price - previous_price) / previous_price) * 100
+        else:
+            price_change_percent = "N/A"
 
         ws.cell(row=2, column=col, value=stock['stock_number'])
-        ws.cell(row=3, column=col, value=current_price)
-        ws.cell(row=4, column=col, value=profit)
+        ws.cell(row=3, column=col, value=current_price if current_price is not None else "N/A")
+        
+        change_cell = ws.cell(row=4, column=col, value=f"{price_change_percent:.2f}%" if price_change_percent != "N/A" else price_change_percent)
+        if price_change_percent != "N/A":
+            if price_change_percent > 0:
+                change_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
+            elif price_change_percent < 0:
+                change_cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+            else:
+                change_cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        
         ws.cell(row=5, column=col, value=stock['nikkei_sentiment'])
         ws.cell(row=6, column=col, value=stock['yahoo_sentiment'])
         ws.cell(row=7, column=col, value=stock['overall_sentiment'])
+        
+        action_cell = ws.cell(row=8, column=col, value=stock['action_recommendation'].split('\n')[0])  # Only the action, not the explanation
+        if "Buy" in action_cell.value:
+            action_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
 
     # Save the workbook
     filename = f"stock_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
     wb.save(filename)
     print(f"Excel report saved as {filename}")
-
-def display_stock_info(stock, rank):
-    print(f"{rank}. {stock['company_name']} ({stock['stock_number']}):")
-    print(f"   Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "   Current Price: N/A")
-    print(f"   Nikkei's Impression: {stock['nikkei_sentiment']}")
-    print(f"   Yahoo's Impression: {stock['yahoo_sentiment']}")
-    print(f"   Overall Sentiment: {stock['overall_sentiment']}")
-    print(f"   Stock Trend: {stock['stock_trend']}")
-    print(f"   Recommendation: {stock['action_recommendation']}")
-    print()
-
-def interactive_results_display(stock_analysis):
-    current_index = 0
-    while True:
-        for i in range(current_index, min(current_index + 10, len(stock_analysis))):
-            display_stock_info(stock_analysis[i], i + 1)
-        
-        if current_index + 10 >= len(stock_analysis):
-            print("End of list reached.")
-        
-        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, '#buy', '#sell', or '#hold' for top 10 recommendations, or 'exit' to quit: ").strip().lower()
-        
-        if user_input == 'continue' and current_index + 10 < len(stock_analysis):
-            current_index += 10
-        elif user_input.startswith('#'):
-            if user_input[1:] == 'recommend':
-                recommended_stocks = sorted(
-                    [s for s in stock_analysis if 'Buy' in s['action_recommendation'] or 'Hold' in s['action_recommendation']],
-                    key=lambda x: x['current_stock_price'],
-                    reverse=True
-                )[:5]
-                print("\nTop 5 Recommended Stocks:")
-                for i, stock in enumerate(recommended_stocks, 1):
-                    display_stock_info(stock, i)
-            elif user_input in ['#buy', '#sell', '#hold']:
-                action = user_input[1:].capitalize()
-                filtered_stocks = [s for s in stock_analysis if action in s['action_recommendation']]
-                sorted_stocks = sorted(filtered_stocks, key=lambda x: x['current_stock_price'], reverse=True)[:10]
-                print(f"\nTop 10 {action} Recommendations:")
-                for i, stock in enumerate(sorted_stocks, 1):
-                    display_stock_info(stock, i)
-            else:
-                try:
-                    rank = int(user_input[1:]) - 1
-                    if 0 <= rank < len(stock_analysis):
-                        display_detailed_analysis(stock_analysis[rank])
-                    else:
-                        print("Invalid rank number.")
-                except ValueError:
-                    print("Invalid input. Please use '#<rank>' format.")
-        elif user_input == 'exit':
-            break
-        else:
-            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', '#buy', '#sell', '#hold', or 'exit'.")
-
-def display_detailed_analysis(stock):
-    print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
-    print(f"Current Price: ¥{stock['current_stock_price']:.2f}" if stock['current_stock_price'] else "Current Price: N/A")
-    print(f"Nikkei's Impression: {stock['nikkei_sentiment']}")
-    print(f"Yahoo's Impression: {stock['yahoo_sentiment']}")
-    print(f"Overall Sentiment: {stock['overall_sentiment']}")
-    print(f"Stock Trend: {stock['stock_trend']}")
-    print(f"Recommendation: {stock['action_recommendation']}")
-    print("\nNikkei News:")
-    for i, news in enumerate(stock['nikkei_news'], 1):
-        print(f"  {i}. {news['title']}")
-        print(f"     URL: {news['url']}")
-    print("\nYahoo Finance News:")
-    for i, news in enumerate(stock['yahoo_news'], 1):
-        print(f"  {i}. {news['title']}")
-        print(f"     URL: {news['url']}")
-    print()
+    # Save the workbook
+    filename = f"stock_analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    wb.save(filename)
+    print(f"Excel report saved as {filename}")
 
 def main():
     stock_data = get_stock_codes_and_names()
@@ -335,7 +296,7 @@ def main():
             overall_sentiment = sentiment_to_text(overall_sentiment_value)
             
             stock_price_data = get_stock_data(stock_number)
-            current_stock_price = stock_price_data[0][1] if stock_price_data else None
+            current_stock_price = get_yahoo_finance_price(stock_number)
             stock_trend = calculate_stock_trend(stock_price_data)
             
             action_recommendation = get_action_recommendation(overall_sentiment, stock_trend, stock_price_data)
@@ -349,8 +310,6 @@ def main():
                 'overall_sentiment': overall_sentiment,
                 'stock_trend': stock_trend,
                 'action_recommendation': action_recommendation,
-                'nikkei_news': nikkei_news_data,
-                'yahoo_news': yahoo_finance_news_data,
                 'stock_price_data': stock_price_data
             })
         
@@ -359,7 +318,6 @@ def main():
 
     print("\nAll stocks processed.")
     create_excel_report(stock_analysis)
-    interactive_results_display(stock_analysis)
 
 if __name__ == '__main__':
     main()
