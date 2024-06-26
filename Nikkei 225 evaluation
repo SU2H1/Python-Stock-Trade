@@ -198,7 +198,7 @@ def interactive_results_display(stock_analysis):
         if current_index + 10 >= len(stock_analysis):
             print("End of list reached.")
         
-        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, or 'exit' to quit: ").strip().lower()
+        user_input = input("Type 'continue' to see more results, '#<rank>' to see detailed analysis for a stock, '#recommend' to see top recommended stocks, '#buy', '#sell', or '#hold' for top 10 recommendations, or 'exit' to quit: ").strip().lower()
         
         if user_input == 'continue' and current_index + 10 < len(stock_analysis):
             current_index += 10
@@ -212,6 +212,13 @@ def interactive_results_display(stock_analysis):
                 print("\nTop 5 Recommended Stocks:")
                 for i, stock in enumerate(recommended_stocks, 1):
                     display_stock_info(stock, i)
+            elif user_input in ['#buy', '#sell', '#hold']:
+                action = user_input[1:].capitalize()
+                filtered_stocks = [s for s in stock_analysis if action in s['action_recommendation']]
+                sorted_stocks = sorted(filtered_stocks, key=lambda x: x['current_stock_price'], reverse=True)[:10]
+                print(f"\nTop 10 {action} Recommendations:")
+                for i, stock in enumerate(sorted_stocks, 1):
+                    display_stock_info(stock, i)
             else:
                 try:
                     rank = int(user_input[1:]) - 1
@@ -224,7 +231,8 @@ def interactive_results_display(stock_analysis):
         elif user_input == 'exit':
             break
         else:
-            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', or 'exit'.")
+            print("Invalid input. Please type 'continue', '#<rank>', '#recommend', '#buy', '#sell', '#hold', or 'exit'.")
+
 
 def display_detailed_analysis(stock):
     print(f"\nDetailed Analysis for {stock['company_name']} ({stock['stock_number']}):")
