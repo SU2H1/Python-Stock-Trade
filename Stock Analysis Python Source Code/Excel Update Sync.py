@@ -223,11 +223,11 @@ def create_excel_report(stock_analysis):
     metrics = [
         f"{today} Stock Price",
         "Previous Day Stock Price",
-        "Previous Day Stock Price Percentage",
-        "Nikkei's Perception",
-        "Yahoo Finance's Perception",
+        "Compared to day before",
+        "Nikkei Perception",
+        "Yahoo Finance Perception",
         "Overall Perception",
-        "Recommended Action"
+        "Action"
     ]
 
     def color_cell(cell, value):
@@ -242,27 +242,27 @@ def create_excel_report(stock_analysis):
     for i, metric in enumerate(metrics):
         ws.cell(row=next_row + i, column=1, value=metric)
         for col, stock in enumerate(stock_analysis, start=2):
-            if i == 0:  # Current day's stock price
+            if i == 0:  # Today's stock price
                 ws.cell(row=next_row + i, column=col, value=stock['current_stock_price'])
             elif i == 1:  # Previous day's stock price
                 ws.cell(row=next_row + i, column=col, value=stock['previous_stock_price'])
-            elif i == 2:  # Previous day's stock price percentage
+            elif i == 2:  # Compared to day before
                 if stock['current_stock_price'] and stock['previous_stock_price']:
                     price_change = ((stock['current_stock_price'] - stock['previous_stock_price']) / stock['previous_stock_price']) * 100
                     change_cell = ws.cell(row=next_row + i, column=col, value=f"{price_change:.2f}%")
                     color_cell(change_cell, price_change)
                 else:
                     ws.cell(row=next_row + i, column=col, value="N/A")
-            elif i == 3:  # Nikkei's Perception
+            elif i == 3:  # Nikkei Perception
                 cell = ws.cell(row=next_row + i, column=col, value=stock['nikkei_sentiment'])
                 color_cell(cell, stock['nikkei_sentiment'])
-            elif i == 4:  # Yahoo Finance's Perception
+            elif i == 4:  # Yahoo Finance Perception
                 cell = ws.cell(row=next_row + i, column=col, value=stock['yahoo_sentiment'])
                 color_cell(cell, stock['yahoo_sentiment'])
             elif i == 5:  # Overall Perception
                 cell = ws.cell(row=next_row + i, column=col, value=stock['overall_sentiment'])
                 color_cell(cell, stock['overall_sentiment'])
-            elif i == 6:  # Recommended Action
+            elif i == 6:  # Action
                 cell = ws.cell(row=next_row + i, column=col, value=stock['action_recommendation'].split('\n')[0])
                 if "Buy" in cell.value:
                     cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
