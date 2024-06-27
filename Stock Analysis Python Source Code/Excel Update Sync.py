@@ -204,91 +204,89 @@ def create_excel_report(stock_analysis):
     try:
         wb = openpyxl.load_workbook(filename)
         ws = wb.active
-        last_column = ws.max_column
     except FileNotFoundError:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Stock Analysis"
-        last_column = 1
 
-    # Set up header row (dates)
-    ws.cell(row=1, column=last_column + 1, value=today)
-    ws.cell(row=1, column=last_column + 1).font = Font(bold=True)
-    ws.cell(row=1, column=last_column + 1).alignment = Alignment(horizontal='center', vertical='center')
+    # Set up headers if it's a new file
+    if ws.max_column == 1:
+        headers = ["Metric"] + [stock['company_name'] for stock in stock_analysis]
+        for col, header in enumerate(headers, start=1):
+            ws.cell(row=1, column=col, value=header)
+            ws.cell(row=1, column=col).font = Font(bold=True)
 
-    # Set up row headers if it's a new file
-    if last_column == 1:
-        row_headers = [
-            "Company Name",
-            "Stock Code",
-            "Stock Price",
-            "Previous Day Stock",
-            "Compared to day before",
-            "Nikkei Perception",
-            "Yahoo Finance Perception",
-            "Overall Perception",
-            "Action"
-        ]
-        for row, header in enumerate(row_headers, start=2):
-            cell = ws.cell(row=row, column=1, value=header)
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(horizontal='left', vertical='center')
-            ws.row_dimensions[row].height = 20
+    # Find the next empty row
+    next_row = ws.max_row + 1
 
-    def color_sentiment(cell, sentiment):
-        if sentiment == "Positive" or sentiment == "Very Positive":
+    # Define the metrics
+    metrics = [
+        f"{today} Stock Price",
+        "Previous Day Stock Price",
+        "Previous Day Stock Price Percentage",
+        "Nikkei's Perception",
+        "Yahoo Finance's Perception",
+        "Overall Perception",
+        "Recommended Action"
+    ]
+
+    def color_cell(cell, value):
+        if value in ["Positive", "Very Positive"] or (isinstance(value, (float, int)) and value > 0):
             cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
-        elif sentiment == "Negative" or sentiment == "Very Negative":
+        elif value in ["Negative", "Very Negative"] or (isinstance(value, (float, int)) and value < 0):
             cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-        elif sentiment == "Neutral":
+        elif value == "Neutral" or (isinstance(value, (float, int)) and value == 0):
             cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
-    # Populate data
-    for row, stock in enumerate(stock_analysis, start=2):
-        if last_column == 1:
-            ws.cell(row=row, column=1, value=stock['company_name'])
-            ws.cell(row=row, column=2, value=stock['stock_number'])
-
-        current_price = stock['current_stock_price']
-        previous_price = stock['previous_stock_price']
-        
-        if current_price is not None and previous_price is not None:
-            price_change_percent = ((current_price - previous_price) / previous_price) * 100
-        else:
-            price_change_percent = "N/A"
-
-        ws.cell(row=row, column=last_column + 1, value=current_price if current_price is not None else "N/A")
-        ws.cell(row=row, column=last_column + 2, value=previous_price if previous_price is not None else "N/A")
-        
-        change_cell = ws.cell(row=row, column=last_column + 3, value=f"{price_change_percent:.2f}%" if price_change_percent != "N/A" else price_change_percent)
-        if price_change_percent != "N/A":
-            if price_change_percent > 0:
-                change_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
-            elif price_change_percent < 0:
-                change_cell.fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-            else:
-                change_cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        
-        nikkei_cell = ws.cell(row=row, column=last_column + 4, value=stock['nikkei_sentiment'])
-        color_sentiment(nikkei_cell, stock['nikkei_sentiment'])
-        
-        yahoo_cell = ws.cell(row=row, column=last_column + 5, value=stock['yahoo_sentiment'])
-        color_sentiment(yahoo_cell, stock['yahoo_sentiment'])
-        
-        overall_cell = ws.cell(row=row, column=last_column + 6, value=stock['overall_sentiment'])
-        color_sentiment(overall_cell, stock['overall_sentiment'])
-        
-        action_cell = ws.cell(row=row, column=last_column + 7, value=stock['action_recommendation'].split('\n')[0])  # Only the action, not the explanation
-        if "Buy" in action_cell.value:
-            action_cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
+    # Add new data
+    for i, metric in enumerate(metrics):
+        ws.cell(row=next_row + i, column=1, value=metric)
+        for col, stock in enumerate(stock_analysis, start=2):
+            if i == 0:  # Current day's stock price
+                ws.cell(row=next_row + i, column=col, value=stock['current_stock_price'])
+            elif i == 1:  # Previous day's stock price
+                ws.cell(row=next_row + i, column=col, value=stock['previous_stock_price'])
+            elif i == 2:  # Previous day's stock price percentage
+                if stock['current_stock_price'] and stock['previous_stock_price']:
+                    price_change = ((stock['current_stock_price'] - stock['previous_stock_price']) / stock['previous_stock_price']) * 100
+                    change_cell = ws.cell(row=next_row + i, column=col, value=f"{price_change:.2f}%")
+                    color_cell(change_cell, price_change)
+                else:
+                    ws.cell(row=next_row + i, column=col, value="N/A")
+            elif i == 3:  # Nikkei's Perception
+                cell = ws.cell(row=next_row + i, column=col, value=stock['nikkei_sentiment'])
+                color_cell(cell, stock['nikkei_sentiment'])
+            elif i == 4:  # Yahoo Finance's Perception
+                cell = ws.cell(row=next_row + i, column=col, value=stock['yahoo_sentiment'])
+                color_cell(cell, stock['yahoo_sentiment'])
+            elif i == 5:  # Overall Perception
+                cell = ws.cell(row=next_row + i, column=col, value=stock['overall_sentiment'])
+                color_cell(cell, stock['overall_sentiment'])
+            elif i == 6:  # Recommended Action
+                cell = ws.cell(row=next_row + i, column=col, value=stock['action_recommendation'].split('\n')[0])
+                if "Buy" in cell.value:
+                    cell.fill = PatternFill(start_color="00FF00", end_color="00FF00", fill_type="solid")
 
     # Adjust column widths
     for col in range(1, ws.max_column + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 15
+        ws.column_dimensions[get_column_letter(col)].width = 20
 
     # Save the workbook
-    wb.save(filename)
-    print(f"Excel report updated and saved as {filename}")
+    attempt = 0
+    while attempt < 5:  # Try up to 5 times
+        try:
+            if attempt == 0:
+                save_filename = filename
+            else:
+                save_filename = os.path.join(directory, f"Nikkei225_Stock_Analysis_{attempt}.xlsx")
+            wb.save(save_filename)
+            print(f"Excel report updated and saved as {save_filename}")
+            break
+        except PermissionError:
+            print(f"Unable to save to {save_filename}. Trying a different filename...")
+            attempt += 1
+    else:
+        print("Failed to save the Excel file after multiple attempts. Please close any open instances of the file and try again.")
 
 def main():
     stock_data = get_stock_codes_and_names()
