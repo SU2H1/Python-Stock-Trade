@@ -1,0 +1,497 @@
+import requests
+from bs4 import BeautifulSoup
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import numpy as np
+from datetime import datetime, timedelta
+import json
+from langdetect import detect
+import pandas as pd
+import yfinance as yf
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import threading
+import random
+import time
+from typing import List, Tuple
+
+def get_company_name(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    title_tag = soup.find('title')
+    if title_tag:
+        title = title_tag.text.strip()
+        company_name = title.split('【')[0].strip()
+        return company_name
+    else:
+        return None
+
+def get_current_stock_price(stock_number):
+    url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    price_element = soup.select_one('span._3rXWJKZF')
+    
+    if price_element:
+        price_text = price_element.text.strip().replace(',', '')
+        try:
+            return float(price_text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+def scrape_nikkei_news(stock_number):
+    url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        url = "https://www.nikkei.com" + item['href']
+        news_data.append({"title": title, "url": url})
+    return news_data
+
+def scrape_yahoo_finance_news(stock_number):
+    ticker = f"{stock_number}.T"
+    url = f"https://finance.yahoo.co.jp/quote/{ticker}/news"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
+    news_data = []
+    for item in news_items:
+        title = item.text.strip()
+        article_url = item['href']
+        if not article_url.startswith('http'):
+            article_url = "https://finance.yahoo.co.jp" + article_url
+        news_data.append({"title": title, "url": article_url})
+    return news_data
+
+def analyze_sentiment(text, tokenizer, model):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    outputs = model(**inputs)
+    sentiment_score = torch.softmax(outputs.logits, dim=1)
+    return sentiment_score[0][1].item()  # Return the positive sentiment score
+
+def sentiment_to_text(score):
+    if score < 0.2:
+        return "Very Negative"
+    elif score < 0.4:
+        return "Negative"
+    elif score < 0.6:
+        return "Neutral"
+    elif score < 0.8:
+        return "Positive"
+    else:
+        return "Very Positive"
+
+def get_stock_data(stock_number):
+    ticker = f"{stock_number}.T"
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
+    
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date)
+        if df.empty:
+            print("No data found for the specified stock number.")
+            return None
+        
+        df = df.reset_index()
+        df['Date'] = pd.to_datetime(df['Date'])
+        stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
+        
+        # Sort by date (newest first) and return up to 30 days of data
+        stock_data.sort(key=lambda x: x[0], reverse=True)
+        return stock_data[:30]
+    
+    except Exception as e:
+        print(f"Error retrieving stock data: {e}")
+        return None
+
+def identify_pattern(stock_data):
+    if stock_data is None or len(stock_data) < 5:
+        return "Insufficient data for pattern identification"
+    
+    prices = [price for _, price in stock_data]
+    dates = [date for date, _ in stock_data]
+    
+    # Reverse the lists to have oldest data first
+    prices = prices[::-1]
+    dates = dates[::-1]
+    
+    n = len(prices)
+    changes = np.diff(prices)
+    
+    def is_increasing(data):
+        return np.all(np.diff(data) >= 0)
+    
+    def is_decreasing(data):
+        return np.all(np.diff(data) <= 0)
+    
+    def find_peaks(data, order=3):
+        peaks = []
+        for i in range(order, len(data) - order):
+            if all(data[i] > data[i-j] for j in range(1, order+1)) and all(data[i] > data[i+j] for j in range(1, order+1)):
+                peaks.append(i)
+        return np.array(peaks)
+    
+    def find_troughs(data, order=3):
+        troughs = []
+        for i in range(order, len(data) - order):
+            if all(data[i] < data[i-j] for j in range(1, order+1)) and all(data[i] < data[i+j] for j in range(1, order+1)):
+                troughs.append(i)
+        return np.array(troughs)
+    
+    # Upward and Downward Trends
+    if is_increasing(prices):
+        return "Upward Trend"
+    elif is_decreasing(prices):
+        return "Downward Trend"
+    
+    # V-Shape Recovery and Inverted V-Shape
+    if n >= 5:
+        if prices[0] > prices[1] > prices[2] < prices[3] < prices[4]:
+            return "V-Shape Recovery"
+        elif prices[0] < prices[1] < prices[2] > prices[3] > prices[4]:
+            return "Inverted V-Shape"
+    
+    # Double Bottom and Double Top
+    peaks = find_peaks(prices)
+    troughs = find_troughs(prices)
+    
+    if len(troughs) >= 2 and troughs[-1] - troughs[-2] >= 5:
+        if abs(prices[troughs[-1]] - prices[troughs[-2]]) / prices[troughs[-2]] < 0.03:
+            return "Double Bottom"
+    
+    if len(peaks) >= 2 and peaks[-1] - peaks[-2] >= 5:
+        if abs(prices[peaks[-1]] - prices[peaks[-2]]) / prices[peaks[-2]] < 0.03:
+            return "Double Top"
+    
+    # Head and Shoulders
+    if len(peaks) >= 3:
+        if prices[peaks[1]] > prices[peaks[0]] and prices[peaks[1]] > prices[peaks[2]]:
+            if abs(prices[peaks[0]] - prices[peaks[2]]) / prices[peaks[0]] < 0.03:
+                return "Head and Shoulders"
+    
+    # More pattern identifications would follow here...
+    
+    return "No specific pattern identified"
+
+class MAGIStockAnalysisGUI:
+    def __init__(self, master):
+        self.master = master
+        master.title("MAGI Stock Analysis System")
+        master.configure(bg='black')
+        master.attributes('-fullscreen', True)
+
+        self.screen_width = master.winfo_screenwidth()
+        self.screen_height = master.winfo_screenheight()
+
+        self.create_widgets()
+        self.flicker = False
+
+    def create_widgets(self):
+        # Main frame
+        self.main_frame = tk.Frame(self.master, bg='black', bd=2, relief=tk.RAISED)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Top frame
+        top_frame = tk.Frame(self.main_frame, bg='black')
+        top_frame.pack(fill=tk.X, pady=(0, 20))
+
+        tk.Label(top_frame, text="質問", font=("Arial", 20, "bold"), bg='black', fg='orange').pack(side=tk.LEFT, padx=20)
+        tk.Label(top_frame, text="MAGI STOCK ANALYSIS SYSTEM", font=("Arial", 24, "bold"), bg='black', fg='orange').pack(side=tk.TOP, pady=10)
+        tk.Label(top_frame, text="解決", font=("Arial", 20, "bold"), bg='black', fg='orange').pack(side=tk.RIGHT, padx=20)
+        tk.Label(top_frame, text="情報", font=("Arial", 20, "bold"), bg='black', fg='cyan').pack(side=tk.RIGHT, padx=20)
+
+        # MAGI frame
+        magi_frame = tk.Frame(self.main_frame, bg='black')
+        magi_frame.pack(expand=True, fill=tk.BOTH)
+
+        # CASPER
+        self.casper_frame = self.create_magi_component(magi_frame, "CASPER • 3", 0, 0)
+        
+        # BALTHASAR
+        self.balthasar_frame = self.create_magi_component(magi_frame, "BALTHASAR • 2", 0, 1)
+        
+        # MELCHIOR
+        self.melchior_frame = self.create_magi_component(magi_frame, "MELCHIOR • 1", 0, 2)
+
+        magi_frame.grid_columnconfigure((0, 1, 2), weight=1, uniform="col")
+        magi_frame.grid_rowconfigure(0, weight=1)
+
+        # MAGI label
+        tk.Label(magi_frame, text="MAGI", font=("Arial", 20, "bold"), bg='black', fg='orange').place(relx=0.5, rely=0.5, anchor='center')
+
+        # Input frame
+        input_frame = tk.Frame(self.main_frame, bg='black')
+        input_frame.pack(pady=20)
+
+        tk.Label(input_frame, text="Stock Number:", bg='black', fg='orange', font=("Arial", 12)).grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        self.stock_entry = tk.Entry(input_frame, bg='black', fg='orange', insertbackground='orange', font=("Arial", 12))
+        self.stock_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(input_frame, text="Purchase Price:", bg='black', fg='orange', font=("Arial", 12)).grid(row=1, column=0, padx=5, pady=5, sticky='e')
+        self.price_entry = tk.Entry(input_frame, bg='black', fg='orange', insertbackground='orange', font=("Arial", 12))
+        self.price_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        self.analyze_button = tk.Button(input_frame, text="Analyze Stock", command=self.analyze_stock, bg='orange', fg='black', font=("Arial", 12, "bold"))
+        self.analyze_button.grid(row=2, column=0, columnspan=2, pady=10)
+
+        # Footer
+        footer_text = "CODE: 473 FILE: MAGI_SYS EXTENTION: 3023 EX_MODE: OFF PRIORITY: AAA"
+        tk.Label(self.main_frame, text=footer_text, font=("Arial", 10), bg='black', fg='orange').pack(side=tk.BOTTOM, pady=10)
+
+        # Exit button
+        exit_button = tk.Button(self.main_frame, text="Exit", command=self.master.quit, bg='red', fg='white', font=("Arial", 12, "bold"))
+        exit_button.pack(side=tk.BOTTOM, pady=10)
+
+def create_magi_component(self, parent, title, row, column):
+    frame = tk.Frame(parent, bg='cyan', bd=2, relief=tk.RAISED)
+    frame.grid(row=row, column=column, padx=10, pady=10, sticky="nsew")
+
+    title_label = tk.Label(frame, text=title, font=("Arial", 16, "bold"), bg='cyan')
+    title_label.pack(pady=5)
+
+    text_widget = tk.Text(frame, wrap=tk.WORD, bg='cyan', font=("Arial", 12))
+    text_widget.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+
+    return frame
+
+def analyze_stock(self):
+    stock_number = self.stock_entry.get()
+    purchase_price = self.price_entry.get()
+
+    if not stock_number:
+        messagebox.showerror("Error", "Please enter a stock number")
+        return  # Add this line to prevent further execution if stock number is missing
+
+    self.analyze_button.config(state=tk.DISABLED)
+    self.start_magi_flicker()
+    threading.Thread(target=self.perform_analysis, args=(stock_number, purchase_price)).start()
+
+def start_magi_flicker(self):
+    self.flicker = True
+    self.flicker_magi()
+
+def flicker_magi(self):
+    if self.flicker:
+        frames = [self.casper_frame, self.balthasar_frame, self.melchior_frame]
+        for frame in frames:
+            color = random.choice(['cyan', 'black'])
+            frame.config(bg=color)
+            for widget in frame.winfo_children():
+                widget.config(bg=color)
+        self.master.after(200, self.flicker_magi)
+
+    def stop_magi_flicker(self):
+        self.flicker = False
+        frames = [self.casper_frame, self.balthasar_frame, self.melchior_frame]
+        for frame in frames:
+            frame.config(bg='cyan')
+            for widget in frame.winfo_children():
+                widget.config(bg='cyan')
+
+    def perform_analysis(self, stock_number: str, purchase_price: str):
+        try:
+            company_name = get_company_name(stock_number)
+            current_price = get_current_stock_price(stock_number)
+            stock_data = get_stock_data(stock_number)
+            pattern = identify_pattern(stock_data)
+            buy_price, sell_price = get_suggested_price(stock_number)
+
+            nikkei_news = scrape_nikkei_news(stock_number)
+            yahoo_news = scrape_yahoo_finance_news(stock_number)
+            nikkei_sentiments = [analyze_sentiment(news['title']) for news in nikkei_news]
+            yahoo_sentiments = [analyze_sentiment(news['title']) for news in yahoo_news]
+
+            nikkei_sentiment = sentiment_to_text(sum(nikkei_sentiments) / len(nikkei_sentiments) if nikkei_sentiments else 0.5)
+            yahoo_sentiment = sentiment_to_text(sum(yahoo_sentiments) / len(yahoo_sentiments) if yahoo_sentiments else 0.5)
+            overall_sentiment_score = (sum(nikkei_sentiments) + sum(yahoo_sentiments)) / (len(nikkei_sentiments) + len(yahoo_sentiments)) if nikkei_sentiments or yahoo_sentiments else 0.5
+            overall_sentiment = sentiment_to_text(overall_sentiment_score)
+
+            recommendation, explanation = self.get_action_recommendation(
+                overall_sentiment, 
+                pattern, 
+                stock_data, 
+                float(purchase_price) if purchase_price else None
+            )
+
+            self.update_gui(
+                company_name, current_price, pattern, buy_price, sell_price, stock_data,
+                nikkei_sentiment, yahoo_sentiment, overall_sentiment, recommendation, explanation
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+        self.stop_magi_flicker()
+        self.master.after(0, lambda: self.analyze_button.config(state=tk.NORMAL))
+
+    def get_action_recommendation(self, public_opinion: str, stock_trend: str, stock_price_data: List[Tuple[float, float]], purchase_price: float = None) -> Tuple[str, str]:
+        # Implement your recommendation logic here
+        # This is a placeholder implementation
+        return "Hold", "Placeholder explanation"
+
+    def update_gui(self, company_name: str, current_price: float, pattern: str, buy_price: float, sell_price: float,
+                stock_data: List[Tuple[float, float]], nikkei_sentiment: str, yahoo_sentiment: str, 
+                overall_sentiment: str, recommendation: str, explanation: str):
+        # Update CASPER
+        casper_text = self.casper_frame.winfo_children()[-1]
+        casper_text.delete('1.0', tk.END)
+        casper_text.insert(tk.END, f"Company: {company_name}\n")
+        casper_text.insert(tk.END, f"Current Price: ¥{current_price}\n")
+        casper_text.insert(tk.END, f"Pattern: {pattern}\n")
+
+        # Update BALTHASAR
+        balthasar_text = self.balthasar_frame.winfo_children()[-1]
+        balthasar_text.delete('1.0', tk.END)
+        balthasar_text.insert(tk.END, f"Suggested Buy: ¥{buy_price}\n")
+        balthasar_text.insert(tk.END, f"Suggested Sell: ¥{sell_price}\n")
+
+        # Update MELCHIOR
+        melchior_text = self.melchior_frame.winfo_children()[-1]
+        melchior_text.delete('1.0', tk.END)
+        melchior_text.insert(tk.END, f"Nikkei Sentiment: {nikkei_sentiment}\n")
+        melchior_text.insert(tk.END, f"Yahoo Finance Sentiment: {yahoo_sentiment}\n")
+        melchior_text.insert(tk.END, f"Overall Sentiment: {overall_sentiment}\n")
+        melchior_text.insert(tk.END, f"Recommendation: {recommendation}\n")
+        melchior_text.insert(tk.END, f"Explanation: {explanation}\n")
+
+    def get_suggested_price(self, stock_number):
+        ticker = f"{stock_number}.T"
+        stock = yf.Ticker(ticker)
+        history = stock.history(period="1y")
+        
+        if history.empty:
+            return None, None
+        
+        current_price = history['Close'][-1]
+        avg_price = history['Close'].mean()
+        max_price = history['Close'].max()
+        min_price = history['Close'].min()
+        
+        buy_price = (avg_price + min_price) / 2
+        sell_price = (avg_price + max_price) / 2
+        
+        return round(buy_price, 2), round(sell_price, 2)
+
+def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, purchase_price=None):
+    if not stock_price_data:
+        return "Insufficient data", "Unable to provide a recommendation due to lack of data."
+
+    opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
+    trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
+    
+    total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+    
+    current_price = stock_price_data[0][1]
+    
+    if purchase_price:
+        price_change = (current_price - purchase_price) / purchase_price * 100
+        
+        if total_score < 0:
+            if price_change > 0:
+                return "Consider Selling", f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
+            else:
+                return "Consider Selling", f"Negative outlook. You're currently down {abs(price_change):.2f}%. Consider selling to minimize losses."
+        elif total_score > 0:
+            return "Hold", f"Positive outlook. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Consider holding for potential {'further gains' if price_change > 0 else 'recovery'}."
+        else:
+            return "Hold and Monitor", f"Mixed signals. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Monitor the stock closely for changes in sentiment or market trends."
+    else:
+        if total_score > 0:
+            return "Consider Buying", "Positive outlook. Consider buying at the current price or wait for a dip."
+        elif total_score < 0:
+            return "Hold Off", "Negative outlook. It might be better to wait for a more favorable entry point."
+        else:
+            return "Monitor", "Mixed signals. Monitor the stock for a clearer trend before making a decision."
+
+    def update_gui(self, company_name, current_price, pattern, buy_price, sell_price, stock_data, sentiment, recommendation):
+        # Update CASPER
+        self.casper_frame.delete('1.0', tk.END)
+        self.casper_frame.insert(tk.END, f"Company: {company_name}\n")
+        self.casper_frame.insert(tk.END, f"Current Price: ¥{current_price}\n")
+        self.casper_frame.insert(tk.END, f"Pattern: {pattern}\n")
+        self.casper_frame.insert(tk.END, f"Suggested Buy: ¥{buy_price}\n")
+        self.casper_frame.insert(tk.END, f"Suggested Sell: ¥{sell_price}\n")
+
+        # Update BALTHASAR (Chart)
+        # Implement chart update logic here
+
+        # Update MELCHIOR
+        self.melchior_frame.delete('1.0', tk.END)
+        self.melchior_frame.insert(tk.END, f"Overall Sentiment: {sentiment}\n")
+        self.melchior_frame.insert(tk.END, f"Recommendation: {recommendation}\n")
+
+    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, purchase_price=None):
+        if not stock_price_data:
+            return "Insufficient data for recommendation"
+
+        opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
+        trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
+        
+        total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+        
+        prices = [price for _, price in stock_price_data]
+        current_price = prices[0]
+        avg_price = np.mean(prices)
+        std_dev = np.std(prices)
+        
+        # User owns the stock if purchase_price is not None
+        owns_stock = purchase_price is not None
+        
+        if owns_stock:
+            price_change = (current_price - purchase_price) / purchase_price * 100
+            
+            if total_score > 0:
+                if price_change > 0:
+                    action = "Hold"
+                    explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
+                else:
+                    action = "Hold"
+                    explanation = f"Positive outlook despite current loss. You're currently down {abs(price_change):.2f}%. Consider holding for potential recovery."
+            elif total_score < 0:
+                if price_change > 0:
+                    action = "Consider Selling"
+                    explanation = f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
+                else:
+                    action = "Consider Selling"
+                    explanation = f"Negative outlook. You're currently down {abs(price_change):.2f}%. Consider selling to minimize losses."
+            else:
+                action = "Hold and Monitor"
+                explanation = f"Mixed signals. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Monitor the stock closely for changes in sentiment or market trends."
+            
+            # Add additional context based on significant gains or losses
+            if price_change > 20:
+                explanation += " However, with significant gains, consider taking partial profits."
+            elif price_change < -20:
+                explanation += " However, with significant losses, reassess your investment thesis."
+        else:
+            # Logic for users who don't own the stock
+            if total_score > 0:
+                target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
+                action = f"Consider Buying (Target: ¥{target_price:.2f})"
+                explanation = "Positive outlook. Consider buying near the suggested target price."
+            elif total_score < 0:
+                action = "Hold Off"
+                explanation = "Negative outlook. It might be better to wait for a more favorable entry point."
+            else:
+                action = "Monitor"
+                explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
+
+        return f"{action}\nExplanation: {explanation}"
+
+def main():
+    root = tk.Tk()
+    app = MAGIStockAnalysisGUI(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
