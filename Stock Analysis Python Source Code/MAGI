@@ -1,144 +1,125 @@
-import tkinter as tk
-from tkinter import font, messagebox, simpledialog
-import time
 import requests
 from bs4 import BeautifulSoup
-import yfinance as yf
-from datetime import datetime, timedelta
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
 import numpy as np
+from datetime import datetime, timedelta
+import json
+from langdetect import detect
 import pandas as pd
-from textblob import TextBlob
+import yfinance as yf
+import sys
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit
+from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
-class MAGIInspiredStockAnalyzer:
-    def __init__(self, master):
-        self.master = master
-        master.title("MAGI Stock Analyzer")
-        master.configure(bg='black')
-        master.geometry("800x600")
 
-        self.custom_font = font.Font(family="Courier", size=10)
-        self.header_font = font.Font(family="Courier", size=12, weight="bold")
+class MAGIStockAnalysis(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        self.ja_tokenizer = AutoTokenizer.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+        self.ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+        self.en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+        self.en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+        self.flicker_timers = {}
 
-        self.create_widgets()
-        self.update_time()
+    def initUI(self):
+        self.setWindowTitle('MAGI Stock Analysis System')
+        self.setGeometry(100, 100, 1200, 800)
+        self.setStyleSheet("background-color: black; color: #00ff00;")
 
-    def create_widgets(self):
+        main_layout = QVBoxLayout()
+
         # Header
-        header_frame = tk.Frame(self.master, bg='black')
-        header_frame.pack(fill=tk.X, padx=10, pady=5)
+        header = QLabel('MAGI Stock Analysis System')
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setStyleSheet("font-size: 24px; color: #ff8c00;")
+        main_layout.addWidget(header)
 
-        tk.Label(header_frame, text="Visual Audio System Control / NGE / MAGI HACK Theme", 
-                fg='orange', bg='black', font=self.custom_font).pack(side=tk.LEFT)
-        tk.Label(header_frame, text="[Re:Work] - ONLINE", 
-                fg='orange', bg='black', font=self.custom_font).pack(side=tk.RIGHT)
+        # Input section
+        input_layout = QHBoxLayout()
+        self.stock_input = QLineEdit()
+        self.stock_input.setPlaceholderText("Enter stock number")
+        self.price_input = QLineEdit()
+        self.price_input.setPlaceholderText("Purchase price (optional)")
+        analyze_button = QPushButton("Analyze")
+        analyze_button.clicked.connect(self.analyze_stock)
+        input_layout.addWidget(self.stock_input)
+        input_layout.addWidget(self.price_input)
+        input_layout.addWidget(analyze_button)
+        main_layout.addLayout(input_layout)
 
-        # Main content
-        main_frame = tk.Frame(self.master, bg='black')
-        main_frame.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+        # MAGI components
+        magi_layout = QHBoxLayout()
+        self.casper = self.create_magi_component("CASPER • 3")
+        self.balthasar = self.create_magi_component("BALTHASAR • 2")
+        self.melchior = self.create_magi_component("MELCHIOR • 1")
+        magi_layout.addWidget(self.casper)
+        magi_layout.addWidget(self.balthasar)
+        magi_layout.addWidget(self.melchior)
+        main_layout.addLayout(magi_layout)
 
-        tk.Label(main_frame, text="Current Operation", fg='orange', bg='black', 
-                font=self.header_font).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 10))
+        self.setLayout(main_layout)
 
-        # Left side info
-        left_frame = tk.Frame(main_frame, bg='black')
-        left_frame.grid(row=1, column=0, sticky='nw')
+    def create_magi_component(self, title):
+        component = QWidget()
+        component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
+        layout = QVBoxLayout()
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet("font-size: 18px; color: #ff8c00;")
+        content = QTextEdit()
+        content.setReadOnly(True)
+        content.setStyleSheet("border: none; background-color: #001a1a; color: #00ff00;")
+        content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+        layout.addWidget(content)
+        component.setLayout(layout)
+        return component
 
-        tk.Label(left_frame, text="CODE : 672", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='w')
-        tk.Label(left_frame, text="FILE: MAGI_SYS", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='w')
-        tk.Label(left_frame, text="EXTENTION: 4096", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='w')
-        tk.Label(left_frame, text="EX_MODE: ERR", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='w')
-        tk.Label(left_frame, text="PRIORITY: S+", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='w')
+    def start_flicker(self, component):
+        if component not in self.flicker_timers:
+            timer = QTimer(self)
+            timer.timeout.connect(lambda: self.flicker_effect(component))
+            timer.start(500)  # Flicker every 500ms
+            self.flicker_timers[component] = timer
 
-        # Right side info
-        right_frame = tk.Frame(main_frame, bg='black')
-        right_frame.grid(row=1, column=1, sticky='ne')
+    def stop_flicker(self, component):
+        if component in self.flicker_timers:
+            self.flicker_timers[component].stop()
+            del self.flicker_timers[component]
+            component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
 
-        tk.Label(right_frame, text="EMERGENCY :STATUS", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='e')
-        
-        progress_frame = tk.Frame(right_frame, bg='orange', width=120, height=20)
-        progress_frame.pack(anchor='e', pady=5)
-        progress = tk.Frame(progress_frame, bg='dark orange', width=40, height=20)
-        progress.place(x=0, y=0)
+    def flicker_effect(self, component):
+        current_style = component.styleSheet()
+        if "background-color: #001a1a" in current_style:
+            component.setStyleSheet("border: 2px solid #ff8c00; background-color: #003a3a;")
+        else:
+            component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
 
-        tk.Label(right_frame, text=":PROGRESS", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='e')
-        tk.Label(right_frame, text="31% :TOTAL", fg='orange', bg='black', 
-                font=self.custom_font).pack(anchor='e')
-        self.time_label = tk.Label(right_frame, text="00:39 :REMAINING TIME", fg='orange', bg='black', 
-                                font=self.custom_font)
-        self.time_label.pack(anchor='e')
+    def analyze_stock(self):
+        # Start flickering
+        for component in [self.casper, self.balthasar, self.melchior]:
+            self.start_flicker(component)
+            component.findChild(QTextEdit).setText("Loading...")
 
-        # MAGI systems
-        magi_frame = tk.Frame(main_frame, bg='black')
-        magi_frame.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=20)
-        main_frame.grid_rowconfigure(2, weight=1)
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
-
-        for i, name in enumerate(["CASPER.3", "BALTHAZAR.2", "MELCHIOR.1"]):
-            frame = tk.Frame(magi_frame, bg='blue', width=200, height=150)
-            frame.grid(row=0, column=i, padx=10)
-            frame.grid_propagate(False)
-            tk.Label(frame, text=name, fg='black', bg='blue', 
-                    font=self.custom_font).place(relx=0.5, rely=0.5, anchor='center')
-
-        tk.Label(magi_frame, text="MAGI-01\nORIGINAL", fg='orange', bg='black', 
-                font=self.custom_font).grid(row=1, column=0, columnspan=3, pady=10)
-
-        # Add a button to start analysis
-        analyze_button = tk.Button(main_frame, text="Analyze Stock", command=self.start_analysis,
-                                fg='orange', bg='black', font=self.custom_font)
-        analyze_button.grid(row=3, column=0, columnspan=2, pady=10)
-
-        # Footer
-        footer_frame = tk.Frame(self.master, bg='black')
-        footer_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=5)
-
-        tk.Label(footer_frame, text="Track [Shiro Sagisu - Em20#070720 (MIX)]", 
-                fg='orange', bg='black', font=self.custom_font).pack(side=tk.LEFT)
-        tk.Label(footer_frame, text="NETWORK: N HACK | System: S ERROR", 
-                fg='orange', bg='black', font=self.custom_font).pack(side=tk.RIGHT)
-
-    def update_time(self):
-        current_time = time.strftime("%M:%S")
-        self.time_label.config(text=f"{current_time} :REMAINING TIME")
-        self.master.after(1000, self.update_time)
-
-    def start_analysis(self):
-        stock_number = simpledialog.askstring("Input", "Enter the stock exchange number (e.g., 3092 for ZOZO):")
-        if not stock_number:
-            return
-
-        company_name = self.get_company_name(stock_number)
-        if not company_name:
-            messagebox.showerror("Error", "Company name could not be found. Please enter a valid stock exchange number.")
-            return
-
-        confirmation = messagebox.askyesno("Confirm", f"The company for stock number {stock_number} is {company_name}. Is this correct?")
-        if not confirmation:
-            return
-
-        purchase_price = simpledialog.askstring("Input", "Enter the price of the stock when you bought it (if not purchased, enter 'n/a'):")
-        if purchase_price and purchase_price.lower() != 'n/a':
+        stock_number = self.stock_input.text()
+        purchase_price = self.price_input.text()
+        if purchase_price.lower() == 'n/a' or purchase_price == '':
+            purchase_price = None
+        else:
             try:
                 purchase_price = float(purchase_price)
             except ValueError:
-                messagebox.showwarning("Warning", "Invalid price entered. Setting purchase price to N/A.")
+                self.show_error("Invalid purchase price. Using N/A.")
                 purchase_price = None
-        else:
-            purchase_price = None
 
-        self.analyze_stock(stock_number, company_name, purchase_price)
-
-    def analyze_stock(self, stock_number, company_name, purchase_price):
         try:
+            company_name = self.get_company_name(stock_number)
             current_stock_price = self.get_current_stock_price(stock_number)
+            
             nikkei_news_data = self.scrape_nikkei_news(stock_number)
             yahoo_finance_news_data = self.scrape_yahoo_finance_news(stock_number)
             
@@ -160,32 +141,42 @@ class MAGIInspiredStockAnalyzer:
             else:
                 matched_pattern = "Unable to retrieve stock data"
             
-            if current_stock_price is not None:
-                result = f"\nStock Analysis for {company_name} ({stock_number}):\n"
-                result += f"Current Price: ¥{current_stock_price:.2f}\n"
-                
-                if purchase_price is not None:
-                    price_difference = current_stock_price - purchase_price
-                    price_percentage = (price_difference / purchase_price) * 100
-                    result += f"Purchase Price: ¥{purchase_price:.2f}\n"
-                    result += f"Price Difference: ¥{price_difference:.2f} ({price_percentage:.2f}%)\n"
-                else:
-                    result += "Purchase Price: N/A\n"
-                    result += "Price Difference: N/A\n"
-                
-                result += f"\nIdentified 30-Day Pattern: {matched_pattern}\n"
-                result += f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}\n"
-                result += f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}\n"
-                result += f"Overall Sentiment: {overall_sentiment}\n"
-                
-                recommendation = self.get_action_recommendation(overall_sentiment, matched_pattern, stock_data, purchase_price)
-                result += f"\nRecommended Action: {recommendation}\n"
-                
-                messagebox.showinfo("Analysis Result", result)
-            else:
-                messagebox.showerror("Error", "Unable to retrieve current stock price. Please check the stock number and try again.")
+            psr, pbr = self.scrape_psr_pbr(stock_number)
+            psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
+            
+            recommendation = self.get_action_recommendation(overall_sentiment, matched_pattern, stock_data, psr, pbr, purchase_price)
+            
+            # Prepare PSR and PBR strings
+            psr_string = f"{psr:.2f}" if psr is not None else "N/A"
+            pbr_string = f"{pbr:.2f}" if pbr is not None else "N/A"
+            
+            # Update MAGI components with results
+            self.casper.findChild(QTextEdit).setText(
+                f"Nikkei Sentiment: {nikkei_overall_sentiment}\n"
+                f"Yahoo Sentiment: {yahoo_finance_overall_sentiment}\n"
+                f"Overall Sentiment: {overall_sentiment}"
+            )
+            self.balthasar.findChild(QTextEdit).setText(
+                f"30-Day Pattern: {matched_pattern}\n"
+                f"Recommended Action: {recommendation}"
+            )
+            self.melchior.findChild(QTextEdit).setText(
+                f"Current Price: ¥{current_stock_price:.2f}\n"
+                f"Purchase Price: {f'¥{purchase_price:.2f}' if purchase_price else 'N/A'}\n"
+                f"Price Difference: {self.calculate_price_difference(current_stock_price, purchase_price)}\n"
+                f"PSR: {psr_string} - {psr_comment}\n"
+                f"PBR: {pbr_string} - {pbr_comment}"
+            )
         except Exception as e:
-            messagebox.showerror("Error", f"An error occurred while processing the stock data: {str(e)}\nPlease check the stock number and try again.")
+            self.show_error(f"An error occurred: {str(e)}")
+        finally:
+            # Stop flickering
+            for component in [self.casper, self.balthasar, self.melchior]:
+                self.stop_flicker(component)
+
+    def show_error(self, message):
+        for component in [self.casper, self.balthasar, self.melchior]:
+            component.findChild(QTextEdit).setText(message)
 
     def get_company_name(self, stock_number):
         url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
@@ -198,6 +189,7 @@ class MAGIInspiredStockAnalyzer:
             return company_name
         else:
             return None
+        
 
     def get_current_stock_price(self, stock_number):
         url = f"https://finance.yahoo.co.jp/quote/{stock_number}.T"
@@ -214,6 +206,7 @@ class MAGIInspiredStockAnalyzer:
                 return None
         else:
             return None
+        
 
     def scrape_nikkei_news(self, stock_number):
         url = f"https://www.nikkei.com/nkd/company/news/?scode={stock_number}&ba=1"
@@ -226,6 +219,7 @@ class MAGIInspiredStockAnalyzer:
             url = "https://www.nikkei.com" + item['href']
             news_data.append({"title": title, "url": url})
         return news_data
+        
 
     def scrape_yahoo_finance_news(self, stock_number):
         ticker = f"{stock_number}.T"
@@ -241,24 +235,44 @@ class MAGIInspiredStockAnalyzer:
                 article_url = "https://finance.yahoo.co.jp" + article_url
             news_data.append({"title": title, "url": article_url})
         return news_data
+        
 
     def analyze_sentiment(self, text):
-        blob = TextBlob(text)
-        # TextBlob sentiment polarity ranges from -1 (very negative) to 1 (very positive)
-        # We'll normalize this to a 0-1 scale for consistency with our previous approach
-        return (blob.sentiment.polarity + 1) / 2
+        try:
+            lang = detect(text)
+        except:
+            lang = 'ja'  # Default to Japanese if detection fails
+
+        if lang == 'ja':
+            tokenizer = self.ja_tokenizer
+            model = self.ja_model
+        else:
+            tokenizer = self.en_tokenizer
+            model = self.en_model
+
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+        outputs = model(**inputs)
+        sentiment_score = torch.softmax(outputs.logits, dim=1).tolist()[0]
+        return sentiment_score[0]
 
     def sentiment_to_text(self, score):
         if score > 0.8:
-            return "Very Positive"
+            return "Very Negative"
         elif score > 0.6:
-            return "Positive"
+            return "Negative"
         elif score > 0.4:
             return "Neutral"
         elif score > 0.2:
-            return "Negative"
+            return "Positive"
         else:
-            return "Very Negative"
+            return "Very Positive"
+
+
+    def get_overall_sentiment(self, sentiments):
+        if not sentiments:
+            return "No data"
+        avg_sentiment = sum(sentiments) / len(sentiments)
+        return self.sentiment_to_text(avg_sentiment)
 
     def get_stock_data(self, stock_number):
         ticker = f"{stock_number}.T"
@@ -282,6 +296,7 @@ class MAGIInspiredStockAnalyzer:
         except Exception as e:
             print(f"Error retrieving stock data: {e}")
             return None
+
 
     def identify_pattern(self, stock_data):
         if stock_data is None or len(stock_data) < 5:
@@ -385,69 +400,92 @@ class MAGIInspiredStockAnalyzer:
                 return "Rounding Top"
         
         return "No specific pattern identified"
+    
 
-    def get_suggested_price(self, stock_number):
-        ticker = f"{stock_number}.T"
-        stock = yf.Ticker(ticker)
-        history = stock.history(period="1y")
-        
-        if history.empty:
-            return None, None
-        
-        current_price = history['Close'][-1]
-        avg_price = history['Close'].mean()
-        max_price = history['Close'].max()
-        min_price = history['Close'].min()
-        
-        buy_price = (avg_price + min_price) / 2
-        sell_price = (avg_price + max_price) / 2
-        
-        return round(buy_price, 2), round(sell_price, 2)
-
-    # Main function to get all the information
-    def get_stock_info(stock_number):
-        company_name = get_company_name(stock_number)
-        current_stock_price = get_current_stock_price(stock_number)
-        
-        ja_tokenizer = AutoTokenizer.from_pretrained("daigo/bert-base-japanese-sentiment")
-        ja_model = AutoModelForSequenceClassification.from_pretrained("daigo/bert-base-japanese-sentiment")
-        en_tokenizer = AutoTokenizer.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
-        en_model = AutoModelForSequenceClassification.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
-        
-        news_data = scrape_nikkei_news(stock_number) + scrape_yahoo_finance_news(stock_number)
-        
-        news_sentiments = []
-        for news in news_data:
-            sentiment_score = analyze_sentiment(news['title'], ja_tokenizer, ja_model, en_tokenizer, en_model)
-            sentiment_text = sentiment_to_text(sentiment_score)
-            news_sentiments.append({
-                'title': news['title'],
-                'url': news['url'],
-                'sentiment': sentiment_text
-            })
-        
-        stock_data = get_stock_data(stock_number)
-        pattern = identify_pattern(stock_data)
-        
-        buy_price, sell_price = get_suggested_price(stock_number)
-        
-        return {
-            'company_name': company_name,
-            'current_stock_price': current_stock_price,
-            'news': news_sentiments,
-            'pattern': pattern,
-            'buy_price': buy_price,
-            'sell_price': sell_price
+    def scrape_psr_pbr(self, stock_number):
+        url = f"https://minkabu.jp/stock/{stock_number}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            psr = pbr = None
+            
+            # Find all table rows
+            rows = soup.find_all('tr', class_='ly_vamd')
+            
+            for row in rows:
+                # Find the th element in the row
+                th = row.find('th', class_='ly_vamd_inner ly_colsize_3_fix tal wsnw')
+                if th:
+                    # Check if it's PSR or PBR
+                    if th.text.strip() == 'PSR':
+                        td = row.find('td', class_='ly_vamd_inner ly_colsize_9_fix fwb tar wsnw')
+                        if td:
+                            psr = float(td.text.strip().replace('倍', ''))
+                    elif th.text.strip() == 'PBR':
+                        td = row.find('td', class_='ly_vamd_inner ly_colsize_9_fix fwb tar wsnw')
+                        if td:
+                            pbr = float(td.text.strip().replace('倍', ''))
+            
+            return psr, pbr
+        
+        except requests.RequestException as e:
+            print(f"Error fetching data from Minkabu: {e}")
+            return None, None
+        except ValueError as e:
+            print(f"Error parsing PSR or PBR value: {e}")
+            return None, None
+    
 
-    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, purchase_price=None):
+    def evaluate_psr_pbr(self, psr, pbr):
+        psr_score = 0
+        pbr_score = 0
+        psr_comment = ""
+        pbr_comment = ""
+        
+        if psr is not None:
+            if psr > 4:
+                psr_score = -1
+                psr_comment = "Company may be overvalued based on PSR."
+            elif 1 <= psr <= 2:
+                psr_score = 1
+                psr_comment = "Company may be undervalued based on PSR."
+            else:
+                psr_comment = "PSR is in a moderate range."
+        
+        if pbr is not None:
+            if pbr > 3:
+                pbr_score = -1
+                pbr_comment = "Company may be overvalued based on PBR."
+            elif pbr < 1:
+                pbr_score = 1
+                pbr_comment = "Company may be undervalued based on PBR."
+            else:
+                pbr_comment = "PBR is in a moderate range."
+        
+        return psr_score, pbr_score, psr_comment, pbr_comment
+    
+
+    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, purchase_price=None):
         if not stock_price_data:
             return "Insufficient data for recommendation"
-
+        
         opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
         trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
         
-        total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+        psr_score, pbr_score, _, _ = self.evaluate_psr_pbr(psr, pbr)
+        
+        total_score = (
+            opinion_score.get(public_opinion, 0) + 
+            trend_score.get(stock_trend, 0) + 
+            psr_score + 
+            pbr_score
+        )
         
         prices = [price for _, price in stock_price_data]
         current_price = prices[0]
@@ -460,14 +498,14 @@ class MAGIInspiredStockAnalyzer:
         if owns_stock:
             price_change = (current_price - purchase_price) / purchase_price * 100
             
-            if total_score > 0:
+            if total_score > 1:
                 if price_change > 0:
                     action = "Hold"
                     explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
                 else:
                     action = "Hold"
                     explanation = f"Positive outlook despite current loss. You're currently down {abs(price_change):.2f}%. Consider holding for potential recovery."
-            elif total_score < 0:
+            elif total_score < -1:
                 if price_change > 0:
                     action = "Consider Selling"
                     explanation = f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
@@ -485,26 +523,29 @@ class MAGIInspiredStockAnalyzer:
                 explanation += " However, with significant losses, reassess your investment thesis."
         else:
             # Logic for users who don't own the stock
-            if total_score > 0:
+            if total_score > 1:
                 target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
                 action = f"Consider Buying (Target: ¥{target_price:.2f})"
-                explanation = "Positive outlook. Consider buying near the suggested target price."
-            elif total_score < 0:
+                explanation = "Overall positive outlook. Consider buying near the suggested target price."
+            elif total_score < -1:
                 action = "Hold Off"
-                explanation = "Negative outlook. It might be better to wait for a more favorable entry point."
+                explanation = "Overall negative outlook. It might be better to wait for a more favorable entry point."
             else:
                 action = "Monitor"
                 explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
 
         return f"{action}\nExplanation: {explanation}"
 
-    def get_overall_sentiment(self, sentiments):
-        if not sentiments:
-            return "No data"
-        avg_sentiment = sum(sentiments) / len(sentiments)
-        return self.sentiment_to_text(avg_sentiment)
+    def calculate_price_difference(self, current_price, purchase_price):
+        if purchase_price is None:
+            return "N/A"
+        price_difference = current_price - purchase_price
+        price_percentage = (price_difference / purchase_price) * 100
+        return f"¥{price_difference:.2f} ({price_percentage:.2f}%)"
+    
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    analyzer = MAGIInspiredStockAnalyzer(root)
-    root.mainloop()
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ex = MAGIStockAnalysis()
+    ex.show()
+    sys.exit(app.exec())
