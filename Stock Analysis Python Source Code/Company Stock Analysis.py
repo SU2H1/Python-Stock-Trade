@@ -274,14 +274,91 @@ def get_stock_info(stock_number):
         'sell_price': sell_price
     }
 
-def get_action_recommendation(public_opinion, stock_trend, stock_price_data, purchase_price=None):
+
+def scrape_psr_pbr(stock_number):
+    url = f"https://minkabu.jp/stock/{stock_number}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        psr = pbr = None
+        
+        # Find all table rows
+        rows = soup.find_all('tr', class_='ly_vamd')
+        
+        for row in rows:
+            # Find the th element in the row
+            th = row.find('th', class_='ly_vamd_inner ly_colsize_3_fix tal wsnw')
+            if th:
+                # Check if it's PSR or PBR
+                if th.text.strip() == 'PSR':
+                    td = row.find('td', class_='ly_vamd_inner ly_colsize_9_fix fwb tar wsnw')
+                    if td:
+                        psr = float(td.text.strip().replace('倍', ''))
+                elif th.text.strip() == 'PBR':
+                    td = row.find('td', class_='ly_vamd_inner ly_colsize_9_fix fwb tar wsnw')
+                    if td:
+                        pbr = float(td.text.strip().replace('倍', ''))
+        
+        return psr, pbr
+    
+    except requests.RequestException as e:
+        print(f"Error fetching data from Minkabu: {e}")
+        return None, None
+    except ValueError as e:
+        print(f"Error parsing PSR or PBR value: {e}")
+        return None, None
+
+
+def evaluate_psr_pbr(psr, pbr):
+    psr_score = 0
+    pbr_score = 0
+    psr_comment = ""
+    pbr_comment = ""
+    
+    if psr is not None:
+        if psr > 4:
+            psr_score = -1
+            psr_comment = "Company may be overvalued based on PSR."
+        elif 1 <= psr <= 2:
+            psr_score = 1
+            psr_comment = "Company may be undervalued based on PSR."
+        else:
+            psr_comment = "PSR is in a moderate range."
+    
+    if pbr is not None:
+        if pbr > 3:
+            pbr_score = -1
+            pbr_comment = "Company may be overvalued based on PBR."
+        elif pbr < 1:
+            pbr_score = 1
+            pbr_comment = "Company may be undervalued based on PBR."
+        else:
+            pbr_comment = "PBR is in a moderate range."
+    
+    return psr_score, pbr_score, psr_comment, pbr_comment
+
+
+def get_action_recommendation(public_opinion, stock_trend, stock_price_data, psr, pbr, purchase_price=None):
     if not stock_price_data:
         return "Insufficient data for recommendation"
 
     opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
     trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
     
-    total_score = opinion_score.get(public_opinion, 0) + trend_score.get(stock_trend, 0)
+    psr_score, pbr_score, _, _ = evaluate_psr_pbr(psr, pbr)
+    
+    total_score = (
+        opinion_score.get(public_opinion, 0) + 
+        trend_score.get(stock_trend, 0) + 
+        psr_score + 
+        pbr_score
+    )
     
     prices = [price for _, price in stock_price_data]
     current_price = prices[0]
@@ -294,14 +371,14 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
     if owns_stock:
         price_change = (current_price - purchase_price) / purchase_price * 100
         
-        if total_score > 0:
+        if total_score > 1:
             if price_change > 0:
                 action = "Hold"
                 explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
             else:
                 action = "Hold"
                 explanation = f"Positive outlook despite current loss. You're currently down {abs(price_change):.2f}%. Consider holding for potential recovery."
-        elif total_score < 0:
+        elif total_score < -1:
             if price_change > 0:
                 action = "Consider Selling"
                 explanation = f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
@@ -319,18 +396,19 @@ def get_action_recommendation(public_opinion, stock_trend, stock_price_data, pur
             explanation += " However, with significant losses, reassess your investment thesis."
     else:
         # Logic for users who don't own the stock
-        if total_score > 0:
+        if total_score > 1:
             target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
             action = f"Consider Buying (Target: ¥{target_price:.2f})"
-            explanation = "Positive outlook. Consider buying near the suggested target price."
-        elif total_score < 0:
+            explanation = "Overall positive outlook. Consider buying near the suggested target price."
+        elif total_score < -1:
             action = "Hold Off"
-            explanation = "Negative outlook. It might be better to wait for a more favorable entry point."
+            explanation = "Overall negative outlook. It might be better to wait for a more favorable entry point."
         else:
             action = "Monitor"
             explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
 
     return f"{action}\nExplanation: {explanation}"
+
 
 
 def main():
@@ -399,6 +477,9 @@ def main():
         
         current_stock_price = get_current_stock_price(stock_number)
         
+        psr, pbr = scrape_psr_pbr(stock_number)
+        psr_score, pbr_score, psr_comment, pbr_comment = evaluate_psr_pbr(psr, pbr)
+        
         if current_stock_price is not None:
             print(f"\nStock Analysis for {company_name} ({stock_number}):")
             print(f"Current Price: ¥{current_stock_price:.2f}")
@@ -412,12 +493,25 @@ def main():
                 print("Purchase Price: N/A")
                 print("Price Difference: N/A")
             
-            print(f"\nIdentified 30-Day Pattern: {matched_pattern}")
             print(f"\nNikkei Overall Sentiment: {nikkei_overall_sentiment}")
             print(f"Yahoo Finance Overall Sentiment: {yahoo_finance_overall_sentiment}")
             print(f"Overall Sentiment: {overall_sentiment}")
             
-            recommendation = get_action_recommendation(overall_sentiment, matched_pattern, stock_data, purchase_price)
+            if psr is not None:
+                print(f"\nPSR (Price-to-Sales Ratio): {psr:.2f}")
+                print(psr_comment)
+            else:
+                print("\nPSR: Unable to retrieve")
+            
+            if pbr is not None:
+                print(f"\nPBR (Price-to-Book Ratio): {pbr:.2f}")
+                print(pbr_comment)
+            else:
+                print("\nPBR: Unable to retrieve")
+            
+            print(f"\nIdentified 30-Day Pattern: {matched_pattern}")
+            
+            recommendation = get_action_recommendation(overall_sentiment, matched_pattern, stock_data, psr, pbr, purchase_price)
             print(f"\nRecommended Action: {recommendation}")
             
             while True:
