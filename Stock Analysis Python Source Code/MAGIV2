@@ -40,6 +40,7 @@ class StockUpdateThread(QThread):
 
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
+        company_name = self.get_company_name()  # Make sure this line is here
         nikkei_news = self.scrape_nikkei_news()
         yahoo_news = self.scrape_yahoo_finance_news()
         nikkei_sentiment = self.analyze_sentiment(nikkei_news)
@@ -49,6 +50,7 @@ class StockUpdateThread(QThread):
         
         return {
             'current_price': current_price,
+            'company_name': company_name,
             'nikkei_sentiment': nikkei_sentiment,
             'yahoo_sentiment': yahoo_sentiment,
             'nikkei_news': nikkei_news,
@@ -118,6 +120,18 @@ class StockUpdateThread(QThread):
             sentiments.append(sentiment_score[0])
 
         return sum(sentiments) / len(sentiments) if sentiments else None
+
+    def get_company_name(self):
+        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        title_tag = soup.find('title')
+        if title_tag:
+            title = title_tag.text.strip()
+            company_name = title.split('【')[0].strip()
+            return company_name
+        else:
+            return "Company name not found"
 
     def get_stock_data(self):
         ticker = f"{self.stock_number}.T"
@@ -201,14 +215,16 @@ class MAGIStockAnalysis(QWidget):
     def initUI(self):
         self.setWindowTitle('MAGI Stock Analysis System')
         self.setGeometry(100, 100, 1200, 800)
-        self.setStyleSheet("background-color: black; color: #00ff00;")
+        self.setStyleSheet("background-color: #000000; color: #00ff00;")
 
         main_layout = QVBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
 
         # Header
         header = QLabel('MAGI Stock Analysis System')
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setStyleSheet("font-size: 24px; color: #ff8c00;")
+        header.setStyleSheet("font-size: 24px; color: #ff8c00; margin-bottom: 10px;")
         main_layout.addWidget(header)
 
         # Input section
@@ -219,6 +235,34 @@ class MAGIStockAnalysis(QWidget):
         self.price_input.setPlaceholderText("Purchase price (optional)")
         analyze_button = QPushButton("Analyze")
         analyze_button.clicked.connect(self.analyze_stock)
+
+        # Style for input fields
+        input_style = """
+            QLineEdit {
+                background-color: #001a1a;
+                color: #00ff00;
+                border: 1px solid #00ff00;
+                border-radius: 5px;
+                padding: 5px;
+            }
+        """
+        self.stock_input.setStyleSheet(input_style)
+        self.price_input.setStyleSheet(input_style)
+
+        # Specific style for Analyze button with orange rectangle
+        analyze_button.setStyleSheet("""
+            QPushButton {
+                background-color: #001a1a;
+                color: #00ff00;
+                border: 2px solid #ff8c00;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #002a2a;
+            }
+        """)
+        
         input_layout.addWidget(self.stock_input)
         input_layout.addWidget(self.price_input)
         input_layout.addWidget(analyze_button)
@@ -226,30 +270,38 @@ class MAGIStockAnalysis(QWidget):
 
         # MAGI components
         magi_layout = QHBoxLayout()
-        self.casper = self.create_magi_component("CASPER • 3")
-        self.balthasar = self.create_magi_component("BALTHASAR • 2")
+        magi_layout.setSpacing(10)
         self.melchior = self.create_magi_component("MELCHIOR • 1")
-        magi_layout.addWidget(self.casper)
-        magi_layout.addWidget(self.balthasar)
+        self.balthasar = self.create_magi_component("BALTHASAR • 2")
+        self.casper = self.create_magi_component("CASPER • 3")
         magi_layout.addWidget(self.melchior)
-        main_layout.addLayout(magi_layout)
+        magi_layout.addWidget(self.balthasar)
+        magi_layout.addWidget(self.casper)
+        main_layout.addLayout(magi_layout, stretch=1)
 
         self.setLayout(main_layout)
 
     def create_magi_component(self, title):
         component = QWidget()
-        component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
-        layout = QVBoxLayout()
+        component.setStyleSheet("""
+            background-color: #001a1a;
+            border: 2px solid #ff8c00;
+            border-radius: 5px;
+        """)
+        layout = QVBoxLayout(component)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
         title_label = QLabel(title)
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet("font-size: 18px; color: #ff8c00;")
+        title_label.setStyleSheet("font-size: 18px; color: #ff8c00; background-color: transparent;")
+        
         content = QTextEdit()
         content.setReadOnly(True)
-        content.setStyleSheet("border: none; background-color: #001a1a; color: #00ff00;")
-        content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        content.setStyleSheet("border: none; background-color: transparent; color: #00ff00;")
+        
         layout.addWidget(title_label)
         layout.addWidget(content)
-        component.setLayout(layout)
+        
         return component
 
     def start_flicker(self, component):
@@ -302,6 +354,7 @@ class MAGIStockAnalysis(QWidget):
     def update_display(self, data, purchase_price):
         try:
             current_price = data['current_price']
+            company_name = data['company_name']
             nikkei_sentiment = data['nikkei_sentiment']
             yahoo_sentiment = data['yahoo_sentiment']
             stock_data = data['stock_data']
@@ -316,6 +369,7 @@ class MAGIStockAnalysis(QWidget):
 
             # Update CASPER
             casper_content = (
+                f"Company: {company_name}\n\n"
                 f"Nikkei Sentiment: {self.sentiment_to_text(nikkei_sentiment)}\n"
                 f"Yahoo Sentiment: {self.sentiment_to_text(yahoo_sentiment)}\n"
                 f"Overall Sentiment: {overall_sentiment_text}"
