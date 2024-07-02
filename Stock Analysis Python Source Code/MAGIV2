@@ -11,10 +11,17 @@ import yfinance as yf
 import sys
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit
 from PyQt6.QtGui import QFont, QColor, QPalette
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
 
 class StockUpdateThread(QThread):
     update_signal = pyqtSignal(dict)
+
+
+    def has_content_changed(self, component_name, new_content):
+        if self.previous_results[component_name] != new_content:
+            self.previous_results[component_name] = new_content
+            return True
+        return False
 
     def __init__(self, stock_number, ja_tokenizer, ja_model, en_tokenizer, en_model):
         super().__init__()
@@ -179,7 +186,18 @@ class MAGIStockAnalysis(QWidget):
         self.en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
         self.flicker_timers = {}
         self.update_thread = None
+        self.previous_results = {
+            'casper': '',
+            'balthasar': '',
+            'melchior': ''
+        }
 
+    def has_content_changed(self, component_name, new_content):
+        if self.previous_results[component_name] != new_content:
+            self.previous_results[component_name] = new_content
+            return True
+        return False
+    
     def initUI(self):
         self.setWindowTitle('MAGI Stock Analysis System')
         self.setGeometry(100, 100, 1200, 800)
@@ -238,7 +256,7 @@ class MAGIStockAnalysis(QWidget):
         if component not in self.flicker_timers:
             timer = QTimer(self)
             timer.timeout.connect(lambda: self.flicker_effect(component))
-            timer.start(500)  # Flicker every 500ms
+            timer.start(100)  # Flicker every 100ms
             self.flicker_timers[component] = timer
 
     def stop_flicker(self, component):
@@ -250,7 +268,7 @@ class MAGIStockAnalysis(QWidget):
     def flicker_effect(self, component):
         current_style = component.styleSheet()
         if "background-color: #001a1a" in current_style:
-            component.setStyleSheet("border: 2px solid #ff8c00; background-color: #003a3a;")
+            component.setStyleSheet("border: 2px solid #ff8c00; background-color: #005a5a;")  # Brighter color
         else:
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
 
@@ -282,47 +300,67 @@ class MAGIStockAnalysis(QWidget):
         self.update_thread.start()
 
     def update_display(self, data, purchase_price):
-        current_price = data['current_price']
-        nikkei_sentiment = data['nikkei_sentiment']
-        yahoo_sentiment = data['yahoo_sentiment']
-        stock_data = data['stock_data']
-        psr, pbr = data['psr'], data['pbr']
+        try:
+            current_price = data['current_price']
+            nikkei_sentiment = data['nikkei_sentiment']
+            yahoo_sentiment = data['yahoo_sentiment']
+            stock_data = data['stock_data']
+            psr, pbr = data['psr'], data['pbr']
 
-        overall_sentiment = (nikkei_sentiment + yahoo_sentiment) / 2 if nikkei_sentiment and yahoo_sentiment else None
-        overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment else "Insufficient data"
+            overall_sentiment = (nikkei_sentiment + yahoo_sentiment) / 2 if nikkei_sentiment and yahoo_sentiment else None
+            overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment else "Insufficient data"
 
-        matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
-        psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
-        recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price)
+            matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
+            psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
+            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price)
 
-        # Update MAGI components with results
-        self.casper.findChild(QTextEdit).setText(
-            f"Nikkei Sentiment: {self.sentiment_to_text(nikkei_sentiment)}\n"
-            f"Yahoo Sentiment: {self.sentiment_to_text(yahoo_sentiment)}\n"
-            f"Overall Sentiment: {overall_sentiment_text}"
-        )
-        self.balthasar.findChild(QTextEdit).setText(
-            f"30-Day Pattern: {matched_pattern}\n"
-            f"Recommended Action: {recommendation}"
-        )
-        
-        current_price_text = f"¥{current_price:.2f}" if current_price is not None else "N/A"
-        purchase_price_text = f"¥{purchase_price:.2f}" if purchase_price is not None else "N/A"
-        psr_text = f"{psr:.2f}" if psr is not None else "N/A"
-        pbr_text = f"{pbr:.2f}" if pbr is not None else "N/A"
-        
-        self.melchior.findChild(QTextEdit).setText(
-            f"Current Price: {current_price_text}\n"
-            f"Purchase Price: {purchase_price_text}\n"
-            f"Price Difference: {self.calculate_price_difference(current_price, purchase_price)}\n"
-            f"PSR: {psr_text} - {psr_comment}\n"
-            f"PBR: {pbr_text} - {pbr_comment}"
-        )
+            # Update CASPER
+            casper_content = (
+                f"Nikkei Sentiment: {self.sentiment_to_text(nikkei_sentiment)}\n"
+                f"Yahoo Sentiment: {self.sentiment_to_text(yahoo_sentiment)}\n"
+                f"Overall Sentiment: {overall_sentiment_text}"
+            )
+            if self.has_content_changed('casper', casper_content):
+                self.update_component_with_flicker(self.casper, casper_content)
+            else:
+                self.casper.findChild(QTextEdit).setText(casper_content)
 
-        # Stop flickering
-        for component in [self.casper, self.balthasar, self.melchior]:
-            self.stop_flicker(component)
+            # Update BALTHASAR
+            balthasar_content = (
+                f"30-Day Pattern: {matched_pattern}\n"
+                f"Recommended Action: {recommendation}"
+            )
+            if self.has_content_changed('balthasar', balthasar_content):
+                self.update_component_with_flicker(self.balthasar, balthasar_content)
+            else:
+                self.balthasar.findChild(QTextEdit).setText(balthasar_content)
 
+            # Update MELCHIOR
+            current_price_text = f"¥{current_price:.2f}" if current_price is not None else "N/A"
+            purchase_price_text = f"¥{purchase_price:.2f}" if purchase_price is not None else "N/A"
+            psr_text = f"{psr:.2f}" if psr is not None else "N/A"
+            pbr_text = f"{pbr:.2f}" if pbr is not None else "N/A"
+            
+            melchior_content = (
+                f"Current Price: {current_price_text}\n"
+                f"Purchase Price: {purchase_price_text}\n"
+                f"Price Difference: {self.calculate_price_difference(current_price, purchase_price)}\n"
+                f"PSR: {psr_text} - {psr_comment}\n"
+                f"PBR: {pbr_text} - {pbr_comment}"
+            )
+            if self.has_content_changed('melchior', melchior_content):
+                self.update_component_with_flicker(self.melchior, melchior_content)
+            else:
+                self.melchior.findChild(QTextEdit).setText(melchior_content)
+
+        except Exception as e:
+            print(f"Error in update_display: {e}")
+            self.show_error(f"An error occurred while updating the display: {e}")
+
+    def update_component_with_flicker(self, component, new_text):
+        self.start_flicker(component)
+        component.findChild(QTextEdit).setText(new_text)
+        QTimer.singleShot(500, lambda: self.stop_flicker(component))
 
     def show_error(self, message):
         for component in [self.casper, self.balthasar, self.melchior]:
