@@ -18,6 +18,11 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from PyQt6.QtGui import QPixmap
 from io import BytesIO
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QMainWindow, QDialog, QTextBrowser
+from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
+from PyQt6.QtWidgets import QTextBrowser
+
 
 
 class StockUpdateThread(QThread):
@@ -192,10 +197,47 @@ class StockUpdateThread(QThread):
     def stop(self):
         self.running = False
 
+
+class SentimentPopup(QDialog):
+    def __init__(self, source, sentiment, news_data):
+        super().__init__()
+        self.setWindowTitle(f"{source} Sentiment Analysis")
+        self.setGeometry(200, 200, 400, 300)
+        self.setStyleSheet("background-color: #001a1a; color: #00ff00;")
+
+        layout = QVBoxLayout()
+
+        sentiment_label = QLabel(f"Overall Sentiment: {sentiment}")
+        sentiment_label.setStyleSheet("font-size: 16px; color: #ff8c00;")
+        layout.addWidget(sentiment_label)
+
+        news_browser = QTextBrowser()
+        news_browser.setStyleSheet("background-color: #002a2a; border: none;")
+        for item in news_data:
+            news_browser.append(f"Title: {item['title']}")
+            news_browser.append(f"URL: <a href='{item['url']}'>{item['url']}</a>")
+            news_browser.append("\n")
+        layout.addWidget(news_browser)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
+        close_button.setStyleSheet("""
+            background-color: #001a1a;
+            color: #00ff00;
+            border: 2px solid #ff8c00;
+            border-radius: 5px;
+            padding: 5px;
+        """)
+        layout.addWidget(close_button)
+
+        self.setLayout(layout)
+
 class MAGIStockAnalysis(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
+        self.nikkei_news_data = []
+        self.yahoo_news_data = []
         
         if getattr(sys, 'frozen', False):
             # we are running in a bundle
@@ -234,6 +276,10 @@ class MAGIStockAnalysis(QWidget):
         self.setWindowTitle('MAGI Stock Analysis System')
         self.setGeometry(100, 100, 1200, 800)
         self.setStyleSheet("background-color: #000000; color: #00ff00;")
+        self.nikkei_sentiment = None
+        self.yahoo_sentiment = None
+        self.nikkei_news_data = []
+        self.yahoo_news_data = []
 
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
@@ -313,9 +359,10 @@ class MAGIStockAnalysis(QWidget):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet("font-size: 18px; color: #ff8c00; background-color: transparent;")
         
-        content = QTextEdit()
-        content.setReadOnly(True)
+        content = QTextBrowser()
+        content.setOpenExternalLinks(False)
         content.setStyleSheet("border: none; background-color: transparent; color: #00ff00;")
+        content.anchorClicked.connect(self.open_sentiment_popup)
         
         graph_label = QLabel()
         graph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -326,6 +373,7 @@ class MAGIStockAnalysis(QWidget):
         layout.addWidget(graph_label)
         
         return component
+
 
     def start_flicker(self, component):
         if component not in self.flicker_timers:
@@ -378,40 +426,43 @@ class MAGIStockAnalysis(QWidget):
         try:
             current_price = data['current_price']
             company_name = data['company_name']
-            nikkei_sentiment = data['nikkei_sentiment']
-            yahoo_sentiment = data['yahoo_sentiment']
+            self.nikkei_sentiment = data['nikkei_sentiment']
+            self.yahoo_sentiment = data['yahoo_sentiment']
+            self.nikkei_news_data = data['nikkei_news']
+            self.yahoo_news_data = data['yahoo_news']
             stock_data = data['stock_data']
             psr, pbr = data['psr'], data['pbr']
 
-            overall_sentiment = (nikkei_sentiment + yahoo_sentiment) / 2 if nikkei_sentiment and yahoo_sentiment else None
-            overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment else "Insufficient data"
+            overall_sentiment = (self.nikkei_sentiment + self.yahoo_sentiment) / 2 if self.nikkei_sentiment is not None and self.yahoo_sentiment is not None else None
+            overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment is not None else "Insufficient data"
 
             matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
             psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
             recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price)
 
             # Update CASPER
-            casper_content = (
-                f"Company: {company_name}\n\n"
-                f"Nikkei Sentiment: {self.sentiment_to_text(nikkei_sentiment)}\n"
-                f"Yahoo Sentiment: {self.sentiment_to_text(yahoo_sentiment)}\n"
-                f"Overall Sentiment: {overall_sentiment_text}"
-            )
+            casper_content = f"""
+                <p>Company: {company_name}</p>
+                <p><a href='nikkei'>Nikkei Sentiment: {self.sentiment_to_text(self.nikkei_sentiment)}</a></p>
+                <p><a href='yahoo'>Yahoo Sentiment: {self.sentiment_to_text(self.yahoo_sentiment)}</a></p>
+                <p>Overall Sentiment: {overall_sentiment_text}</p>
+            """
+            casper_browser = self.casper.findChild(QTextBrowser)
             if self.has_content_changed('casper', casper_content):
                 self.update_component_with_flicker(self.casper, casper_content)
             else:
-                self.casper.findChild(QTextEdit).setText(casper_content)
+                casper_browser.setHtml(casper_content)
 
             # Update BALTHASAR
-            balthasar_content = (
-                f"30-Day Pattern: {matched_pattern}\n"
-                f"Recommended Action: {recommendation}"
-            )
+            balthasar_content = f"""
+                <p>30-Day Pattern: {matched_pattern}</p>
+                <p>Recommended Action: {recommendation}</p>
+            """
             if self.has_content_changed('balthasar', balthasar_content):
                 self.update_component_with_flicker(self.balthasar, balthasar_content)
                 self.update_graph(self.balthasar, stock_data)
             else:
-                self.balthasar.findChild(QTextEdit).setText(balthasar_content)
+                self.balthasar.findChild(QTextBrowser).setHtml(balthasar_content)
 
             # Update MELCHIOR
             current_price_text = f"¥{current_price:.2f}" if current_price is not None else "N/A"
@@ -419,21 +470,45 @@ class MAGIStockAnalysis(QWidget):
             psr_text = f"{psr:.2f}" if psr is not None else "N/A"
             pbr_text = f"{pbr:.2f}" if pbr is not None else "N/A"
             
-            melchior_content = (
-                f"Current Price: {current_price_text}\n"
-                f"Purchase Price: {purchase_price_text}\n"
-                f"Price Difference: {self.calculate_price_difference(current_price, purchase_price)}\n"
-                f"PSR: {psr_text} - {psr_comment}\n"
-                f"PBR: {pbr_text} - {pbr_comment}"
-            )
+            melchior_content = f"""
+                <p>Current Price: {current_price_text}</p>
+                <p>Purchase Price: {purchase_price_text}</p>
+                <p>Price Difference: {self.calculate_price_difference(current_price, purchase_price)}</p>
+                <p>PSR: {psr_text} - {psr_comment}</p>
+                <p>PBR: {pbr_text} - {pbr_comment}</p>
+            """
             if self.has_content_changed('melchior', melchior_content):
                 self.update_component_with_flicker(self.melchior, melchior_content)
             else:
-                self.melchior.findChild(QTextEdit).setText(melchior_content)
+                self.melchior.findChild(QTextBrowser).setHtml(melchior_content)
 
         except Exception as e:
             print(f"Error in update_display: {e}")
             self.show_error(f"An error occurred while updating the display: {e}")
+
+
+    def handle_link_click(self, event, textedit):
+        cursor = textedit.cursorForPosition(event.pos())
+        if cursor.charFormat().isAnchor():
+            anchor = cursor.charFormat().anchorHref()
+            self.open_sentiment_popup(anchor)
+        else:
+            super(QTextEdit, textedit).mousePressEvent(event)
+
+
+    def open_sentiment_popup(self, url):
+        source = url.toString()
+        if source == 'nikkei':
+            sentiment = self.sentiment_to_text(self.nikkei_sentiment)
+            news_data = self.nikkei_news_data
+        elif source == 'yahoo':
+            sentiment = self.sentiment_to_text(self.yahoo_sentiment)
+            news_data = self.yahoo_news_data
+        else:
+            return
+
+        popup = SentimentPopup(source.capitalize(), sentiment, news_data)
+        popup.exec()
 
 
     def update_graph(self, component, stock_data):
@@ -468,8 +543,9 @@ class MAGIStockAnalysis(QWidget):
 
     def update_component_with_flicker(self, component, new_text):
         self.start_flicker(component)
-        component.findChild(QTextEdit).setText(new_text)
+        component.findChild(QTextBrowser).setHtml(new_text)
         QTimer.singleShot(500, lambda: self.stop_flicker(component))
+
 
     def show_error(self, message):
         for component in [self.casper, self.balthasar, self.melchior]:
