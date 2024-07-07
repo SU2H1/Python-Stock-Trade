@@ -566,107 +566,51 @@ class MAGIStockAnalysis(QWidget):
             return "Very Positive"
 
     def identify_pattern(self, stock_data):
-        if stock_data is None or len(stock_data) < 5:
+        if stock_data is None or len(stock_data) < 30:
             return "Insufficient data for pattern identification"
         
-        prices = [price for _, price in stock_data]
-        dates = [date for date, _ in stock_data]
+        # Convert stock_data to DataFrame
+        df = pd.DataFrame(stock_data, columns=['Date', 'Close'])
+        df['Close'] = pd.to_numeric(df['Close'])
         
-        # Reverse the lists to have oldest data first
-        prices = prices[::-1]
-        dates = dates[::-1]
+        # Calculate indicators
+        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = trend.MACD(df['Close']).macd()
+        df['MACD_Signal'] = trend.MACD(df['Close']).macd_signal()
+        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
         
-        n = len(prices)
-        changes = np.diff(prices)
+        # Identify patterns
+        patterns = []
         
-        def is_increasing(data):
-            return np.all(np.diff(data) >= 0)
+        # Trend identification
+        if df['Close'].iloc[-1] > df['Close'].iloc[-5]:
+            patterns.append("Short-term Upward Trend")
+        elif df['Close'].iloc[-1] < df['Close'].iloc[-5]:
+            patterns.append("Short-term Downward Trend")
         
-        def is_decreasing(data):
-            return np.all(np.diff(data) <= 0)
+        # RSI overbought/oversold
+        if df['RSI'].iloc[-1] > 70:
+            patterns.append("Overbought (RSI)")
+        elif df['RSI'].iloc[-1] < 30:
+            patterns.append("Oversold (RSI)")
         
-        def find_peaks(data, order=3):
-            peaks = []
-            for i in range(order, len(data) - order):
-                if all(data[i] > data[i-j] for j in range(1, order+1)) and all(data[i] > data[i+j] for j in range(1, order+1)):
-                    peaks.append(i)
-            return np.array(peaks)
+        # MACD crossover
+        if df['MACD'].iloc[-1] > df['MACD_Signal'].iloc[-1] and df['MACD'].iloc[-2] <= df['MACD_Signal'].iloc[-2]:
+            patterns.append("Bullish MACD Crossover")
+        elif df['MACD'].iloc[-1] < df['MACD_Signal'].iloc[-1] and df['MACD'].iloc[-2] >= df['MACD_Signal'].iloc[-2]:
+            patterns.append("Bearish MACD Crossover")
         
-        def find_troughs(data, order=3):
-            troughs = []
-            for i in range(order, len(data) - order):
-                if all(data[i] < data[i-j] for j in range(1, order+1)) and all(data[i] < data[i+j] for j in range(1, order+1)):
-                    troughs.append(i)
-            return np.array(troughs)
+        # Bollinger Bands
+        if df['Close'].iloc[-1] > df['BB_High'].iloc[-1]:
+            patterns.append("Price Above Upper Bollinger Band")
+        elif df['Close'].iloc[-1] < df['BB_Low'].iloc[-1]:
+            patterns.append("Price Below Lower Bollinger Band")
         
-        # Upward and Downward Trends
-        if is_increasing(prices):
-            return "Upward Trend"
-        elif is_decreasing(prices):
-            return "Downward Trend"
-        
-        # V-Shape Recovery and Inverted V-Shape
-        if n >= 5:
-            if prices[0] > prices[1] > prices[2] < prices[3] < prices[4]:
-                return "V-Shape Recovery"
-            elif prices[0] < prices[1] < prices[2] > prices[3] > prices[4]:
-                return "Inverted V-Shape"
-        
-        # Double Bottom and Double Top
-        peaks = find_peaks(prices)
-        troughs = find_troughs(prices)
-        
-        if len(troughs) >= 2 and troughs[-1] - troughs[-2] >= 5:
-            if abs(prices[troughs[-1]] - prices[troughs[-2]]) / prices[troughs[-2]] < 0.03:
-                return "Double Bottom"
-        
-        if len(peaks) >= 2 and peaks[-1] - peaks[-2] >= 5:
-            if abs(prices[peaks[-1]] - prices[peaks[-2]]) / prices[peaks[-2]] < 0.03:
-                return "Double Top"
-        
-        # Head and Shoulders
-        if len(peaks) >= 3:
-            if prices[peaks[1]] > prices[peaks[0]] and prices[peaks[1]] > prices[peaks[2]]:
-                if abs(prices[peaks[0]] - prices[peaks[2]]) / prices[peaks[0]] < 0.03:
-                    return "Head and Shoulders"
-        
-        # Triangles and Wedges
-        if n >= 15:
-            first_half = prices[:n//2]
-            second_half = prices[n//2:]
-            
-            if is_increasing(first_half) and is_decreasing(second_half):
-                return "Ascending Triangle"
-            elif is_decreasing(first_half) and is_increasing(second_half):
-                return "Descending Triangle"
-            elif (max(first_half) > max(second_half) and min(first_half) < min(second_half)):
-                return "Symmetrical Triangle"
-            elif (max(first_half) > max(second_half) and min(first_half) > min(second_half)):
-                return "Falling Wedge"
-            elif (max(first_half) < max(second_half) and min(first_half) < min(second_half)):
-                return "Rising Wedge"
-        
-        # Pennant and Flag
-        if n >= 20:
-            if is_increasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
-                return "Bullish Pennant"
-            elif is_decreasing(prices[:5]) and np.all(np.abs(np.diff(prices[5:])) < np.mean(np.abs(np.diff(prices[:5])))):
-                return "Bearish Pennant"
-            elif is_increasing(prices[:10]) and is_decreasing(prices[10:]):
-                return "Bullish Flag"
-            elif is_decreasing(prices[:10]) and is_increasing(prices[10:]):
-                return "Bearish Flag"
-        
-        # Rounding Bottom and Top
-        if n >= 15:
-            first_third = prices[:n//3]
-            last_third = prices[-n//3:]
-            if is_decreasing(first_third) and is_increasing(last_third):
-                return "Rounding Bottom"
-            elif is_increasing(first_third) and is_decreasing(last_third):
-                return "Rounding Top"
-        
-        return "No specific pattern identified"
+        if patterns:
+            return ", ".join(patterns)
+        else:
+            return "No clear pattern identified"
 
     def evaluate_psr_pbr(self, psr, pbr):
         psr_score = 0
