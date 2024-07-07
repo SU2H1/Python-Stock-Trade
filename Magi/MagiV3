@@ -22,6 +22,11 @@ from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLa
 from PyQt6.QtGui import QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
 from PyQt6.QtWidgets import QTextBrowser
+import re
+import time
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 
 
@@ -38,22 +43,57 @@ class StockUpdateThread(QThread):
         self.running = True
 
 
-
     def run(self):
         while self.running:
             data = self.fetch_latest_data()
             self.update_signal.emit(data)
-            self.sleep(1)  # Update every second
+            time.sleep(60)  # Update every 60 seconds
+
+
+    def scrape_roa_roe(self):
+        url = f"https://minkabu.jp/stock/{self.stock_number}/settlement"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Find the script tag containing the chart data
+            chart_data = soup.find('settlement-chart-profitability')
+            if chart_data:
+                chart_elements = chart_data.get(':chart-elements')
+                if chart_elements:
+                    # Remove escaped quotes and parse the JSON
+                    chart_json = json.loads(chart_elements.replace('&quot;', '"'))
+                    
+                    # Get the most recent ROA and ROE values
+                    roa = chart_json['roa'][-1] if 'roa' in chart_json and chart_json['roa'] else None
+                    roe = chart_json['roe'][-1] if 'roe' in chart_json and chart_json['roe'] else None
+                    
+                    logging.info(f"Scraped ROA: {roa}, ROE: {roe}")
+                    return roa, roe
+            
+            logging.warning("ROA and ROE data not found in chart elements")
+            return None, None
+        
+        except Exception as e:
+            logging.error(f"Error in scrape_roa_roe: {e}")
+            return None, None
 
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
-        company_name = self.get_company_name()  # Make sure this line is here
+        company_name = self.get_company_name()
         nikkei_news = self.scrape_nikkei_news()
         yahoo_news = self.scrape_yahoo_finance_news()
         nikkei_sentiment = self.analyze_sentiment(nikkei_news)
         yahoo_sentiment = self.analyze_sentiment(yahoo_news)
         stock_data = self.get_stock_data()
         psr, pbr = self.scrape_psr_pbr()
+        roa, roe = self.scrape_roa_roe()
         
         return {
             'current_price': current_price,
@@ -64,8 +104,11 @@ class StockUpdateThread(QThread):
             'yahoo_news': yahoo_news,
             'stock_data': stock_data,
             'psr': psr,
-            'pbr': pbr
+            'pbr': pbr,
+            'roa': roa,
+            'roe': roe
         }
+
 
     def get_current_stock_price(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
@@ -193,6 +236,31 @@ class StockUpdateThread(QThread):
         except (requests.RequestException, ValueError) as e:
             print(f"Error fetching or parsing PSR/PBR data: {e}")
             return None, None
+        
+    def scrape_roe(self):
+        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Find the ROE value
+            roe_element = soup.find('dt', string='ROE')
+            if roe_element:
+                roe_value = roe_element.find_next('dd').text.strip()
+                # Remove the percentage sign and convert to float
+                roe = float(roe_value.replace('%', ''))
+                return roe
+            
+            return None
+        
+        except (requests.RequestException, ValueError) as e:
+            print(f"Error fetching or parsing ROE data: {e}")
+            return None
 
     def stop(self):
         self.running = False
@@ -432,13 +500,15 @@ class MAGIStockAnalysis(QWidget):
             self.yahoo_news_data = data['yahoo_news']
             stock_data = data['stock_data']
             psr, pbr = data['psr'], data['pbr']
+            roa = data['roa']
+            roe = data['roe']
 
             overall_sentiment = (self.nikkei_sentiment + self.yahoo_sentiment) / 2 if self.nikkei_sentiment is not None and self.yahoo_sentiment is not None else None
             overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment is not None else "Insufficient data"
 
             matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
             psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
-            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price)
+            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, roa, roe, purchase_price)
 
             # Update CASPER
             casper_content = f"""
@@ -469,6 +539,8 @@ class MAGIStockAnalysis(QWidget):
             purchase_price_text = f"¥{purchase_price:.2f}" if purchase_price is not None else "N/A"
             psr_text = f"{psr:.2f}" if psr is not None else "N/A"
             pbr_text = f"{pbr:.2f}" if pbr is not None else "N/A"
+            roa_text = f"{roa:.2f}%" if roa is not None else "N/A"
+            roe_text = f"{roe:.2f}%" if roe is not None else "N/A"
             
             melchior_content = f"""
                 <p>Current Price: {current_price_text}</p>
@@ -476,11 +548,14 @@ class MAGIStockAnalysis(QWidget):
                 <p>Price Difference: {self.calculate_price_difference(current_price, purchase_price)}</p>
                 <p>PSR: {psr_text} - {psr_comment}</p>
                 <p>PBR: {pbr_text} - {pbr_comment}</p>
+                <p>ROA: {roa_text}</p>
+                <p>ROE: {roe_text}</p>
             """
             if self.has_content_changed('melchior', melchior_content):
                 self.update_component_with_flicker(self.melchior, melchior_content)
             else:
                 self.melchior.findChild(QTextBrowser).setHtml(melchior_content)
+
 
         except Exception as e:
             print(f"Error in update_display: {e}")
@@ -644,20 +719,26 @@ class MAGIStockAnalysis(QWidget):
         
         return psr_score, pbr_score, psr_comment, pbr_comment
 
-    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, purchase_price=None):
+    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, roa, roe, purchase_price=None):
         if not stock_price_data:
             return "Insufficient data for recommendation"
         
         opinion_score = {"Very Positive": 2, "Positive": 1, "Neutral": 0, "Negative": -1, "Very Negative": -2}
-        trend_score = {"V-Shape Recovery": 1, "Upward Trend": 1, "Downward Trend": -1, "No specific pattern identified": 0}
+        trend_score = {"Short-term Upward Trend": 1, "Short-term Downward Trend": -1, "No clear pattern identified": 0}
         
         psr_score, pbr_score, _, _ = self.evaluate_psr_pbr(psr, pbr)
+        
+        # Evaluate ROA and ROE
+        roa_score = 1 if roa and roa > 5 else (-1 if roa and roa < 2 else 0)
+        roe_score = 1 if roe and roe > 15 else (-1 if roe and roe < 8 else 0)
         
         total_score = (
             opinion_score.get(public_opinion, 0) + 
             trend_score.get(stock_trend, 0) + 
             psr_score + 
-            pbr_score
+            pbr_score +
+            roa_score +
+            roe_score
         )
         
         prices = [price for _, price in stock_price_data]
@@ -671,42 +752,29 @@ class MAGIStockAnalysis(QWidget):
         if owns_stock:
             price_change = (current_price - purchase_price) / purchase_price * 100
             
-            if total_score > 1:
-                if price_change > 0:
-                    action = "Hold"
-                    explanation = f"Positive outlook. You're currently up {price_change:.2f}%. Consider holding for potential further gains."
-                else:
-                    action = "Hold"
-                    explanation = f"Positive outlook despite current loss. You're currently down {abs(price_change):.2f}%. Consider holding for potential recovery."
-            elif total_score < -1:
-                if price_change > 0:
-                    action = "Consider Selling"
-                    explanation = f"Negative outlook despite current gain. You're currently up {price_change:.2f}%. Consider selling to lock in profits."
-                else:
-                    action = "Consider Selling"
-                    explanation = f"Negative outlook. You're currently down {abs(price_change):.2f}%. Consider selling to minimize losses."
+            if total_score > 2:
+                action = "Hold"
+                explanation = f"Strong positive outlook. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Consider holding for potential further gains."
+            elif total_score < -2:
+                action = "Consider Selling"
+                explanation = f"Strong negative outlook. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Consider selling to {'lock in profits' if price_change > 0 else 'minimize losses'}."
             else:
                 action = "Hold and Monitor"
                 explanation = f"Mixed signals. You're currently {'up' if price_change > 0 else 'down'} {abs(price_change):.2f}%. Monitor the stock closely for changes in sentiment or market trends."
-            
-            # Add additional context based on significant gains or losses
-            if price_change > 20:
-                explanation += " However, with significant gains, consider taking partial profits."
-            elif price_change < -20:
-                explanation += " However, with significant losses, reassess your investment thesis."
         else:
-            # Logic for users who don't own the stock
-            if total_score > 1:
+            if total_score > 2:
                 target_price = max(current_price * 0.99, avg_price - 0.5 * std_dev)
                 action = f"Consider Buying (Target: ¥{target_price:.2f})"
-                explanation = "Overall positive outlook. Consider buying near the suggested target price."
-            elif total_score < -1:
+                explanation = "Strong positive outlook. Consider buying near the suggested target price."
+            elif total_score < -2:
                 action = "Hold Off"
-                explanation = "Overall negative outlook. It might be better to wait for a more favorable entry point."
+                explanation = "Strong negative outlook. It might be better to wait for a more favorable entry point."
             else:
                 action = "Monitor"
                 explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
 
+        explanation += f"\n\nThis recommendation is based on:\nSentiment: {public_opinion}\nTrend: {stock_trend}\nPSR: {psr:.2f}\nPBR: {pbr:.2f}\nROA: {roa:.2f}%\nROE: {roe:.2f}%"
+        
         return f"{action}\nExplanation: {explanation}"
 
     def calculate_price_difference(self, current_price, purchase_price):
