@@ -1,38 +1,38 @@
 import requests
 from bs4 import BeautifulSoup
-from transformers import BertForSequenceClassification, BertJapaneseTokenizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, BertJapaneseTokenizer
 import torch
 import numpy as np
 from datetime import datetime, timedelta
 import json
 from langdetect import detect
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
 import yfinance as yf
 import sys
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QMainWindow
 from PyQt6.QtGui import QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
 import os
-import logging
-import re
-
-logging.basicConfig(filename='magi_stock_analysis.log', level=logging.INFO)
-
-model_name = "cl-tohoku/bert-base-japanese-v2"
-tokenizer = BertJapaneseTokenizer.from_pretrained(model_name)
-model = BertForSequenceClassification.from_pretrained(model_name)
+import sys
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from PyQt6.QtGui import QPixmap
+from io import BytesIO
 
 
 class StockUpdateThread(QThread):
     update_signal = pyqtSignal(dict)
 
-    def __init__(self, stock_number):
+    def __init__(self, stock_number, ja_tokenizer, ja_model, en_tokenizer, en_model):
         super().__init__()
         self.stock_number = stock_number
+        self.ja_tokenizer = ja_tokenizer
+        self.ja_model = ja_model
+        self.en_tokenizer = en_tokenizer
+        self.en_model = en_model
         self.running = True
+
+
 
     def run(self):
         while self.running:
@@ -41,273 +41,106 @@ class StockUpdateThread(QThread):
             self.sleep(1)  # Update every second
 
     def fetch_latest_data(self):
-        try:
-            current_price = self.get_current_stock_price()
-            company_name = self.get_company_name()
-            nikkei_news = self.scrape_nikkei_news()
-            yahoo_news = self.scrape_yahoo_finance_news()
-            nikkei_sentiment = self.analyze_sentiment(nikkei_news)
-            yahoo_sentiment = self.analyze_sentiment(yahoo_news)
-            stock_data = self.get_stock_data()
-            psr, pbr = self.scrape_psr_pbr()
-            technical_indicators = self.calculate_technical_indicators(stock_data)
-            price_prediction = self.predict_price(stock_data)
-            fundamental_data = self.get_fundamental_data(self.stock_number)
-            market_sentiment = self.analyze_market_sentiment()
-            
-            return {
-                'current_price': current_price,
-                'company_name': company_name,
-                'nikkei_sentiment': nikkei_sentiment,
-                'yahoo_sentiment': yahoo_sentiment,
-                'nikkei_news': nikkei_news,
-                'yahoo_news': yahoo_news,
-                'stock_data': stock_data,
-                'psr': psr,
-                'pbr': pbr,
-                'technical_indicators': technical_indicators,
-                'price_prediction': price_prediction,
-                'fundamental_data': fundamental_data,
-                'market_sentiment': market_sentiment
-            }
-        except Exception as e:
-            logging.error(f"Error in fetch_latest_data: {str(e)}")
-            return None
+        current_price = self.get_current_stock_price()
+        company_name = self.get_company_name()  # Make sure this line is here
+        nikkei_news = self.scrape_nikkei_news()
+        yahoo_news = self.scrape_yahoo_finance_news()
+        nikkei_sentiment = self.analyze_sentiment(nikkei_news)
+        yahoo_sentiment = self.analyze_sentiment(yahoo_news)
+        stock_data = self.get_stock_data()
+        psr, pbr = self.scrape_psr_pbr()
+        
+        return {
+            'current_price': current_price,
+            'company_name': company_name,
+            'nikkei_sentiment': nikkei_sentiment,
+            'yahoo_sentiment': yahoo_sentiment,
+            'nikkei_news': nikkei_news,
+            'yahoo_news': yahoo_news,
+            'stock_data': stock_data,
+            'psr': psr,
+            'pbr': pbr
+        }
 
     def get_current_stock_price(self):
-        try:
-            url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            price_element = soup.select_one('span._3rXWJKZF')
-            if price_element:
-                price_text = price_element.text.strip().replace(',', '')
+        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        price_element = soup.select_one('span._3rXWJKZF')
+        if price_element:
+            price_text = price_element.text.strip().replace(',', '')
+            try:
                 return float(price_text)
-            return None
-        except Exception as e:
-            logging.error(f"Error in get_current_stock_price: {str(e)}")
-            return None
+            except ValueError:
+                return None
+        return None
 
     def scrape_nikkei_news(self):
-        try:
-            url = f"https://www.nikkei.com/nkd/company/news/?scode={self.stock_number}&ba=1"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
-            news_data = []
-            for item in news_items[:5]:  # Get latest 5 news items
-                title = item.text.strip()
-                url = "https://www.nikkei.com" + item['href']
-                news_data.append({"title": title, "url": url})
-            return news_data
-        except Exception as e:
-            logging.error(f"Error in scrape_nikkei_news: {str(e)}")
-            return []
+        url = f"https://www.nikkei.com/nkd/company/news/?scode={self.stock_number}&ba=1"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
+        news_data = []
+        for item in news_items[:5]:  # Get latest 5 news items
+            title = item.text.strip()
+            url = "https://www.nikkei.com" + item['href']
+            news_data.append({"title": title, "url": url})
+        return news_data
 
     def scrape_yahoo_finance_news(self):
-        try:
-            url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T/news"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
-            news_data = []
-            for item in news_items[:5]:  # Get latest 5 news items
-                title = item.text.strip()
-                article_url = item['href']
-                if not article_url.startswith('http'):
-                    article_url = "https://finance.yahoo.co.jp" + article_url
-                news_data.append({"title": title, "url": article_url})
-            return news_data
-        except Exception as e:
-            logging.error(f"Error in scrape_yahoo_finance_news: {str(e)}")
-            return []
+        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T/news"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
+        news_data = []
+        for item in news_items[:5]:  # Get latest 5 news items
+            title = item.text.strip()
+            article_url = item['href']
+            if not article_url.startswith('http'):
+                article_url = "https://finance.yahoo.co.jp" + article_url
+            news_data.append({"title": title, "url": article_url})
+        return news_data
 
     def analyze_sentiment(self, news_data):
-        try:
-            sentiments = []
-            for news in news_data:
-                inputs = tokenizer(news['title'], return_tensors="pt", truncation=True, max_length=512)
-                outputs = model(**inputs)
-                probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                positive_probability = probabilities[0][1].item()
-                sentiments.append(positive_probability)
-            return sum(sentiments) / len(sentiments) if sentiments else None
-        except Exception as e:
-            logging.error(f"Error in analyze_sentiment: {str(e)}")
-            return None
+        sentiments = []
+        for news in news_data:
+            try:
+                lang = detect(news['title'])
+            except:
+                lang = 'ja'  # Default to Japanese if detection fails
 
-    def calculate_technical_indicators(self, data):
-        try:
-            prices = np.array([price for _, price in data])
-            
-            def sma(data, period):
-                return np.convolve(data, np.ones(period), 'valid') / period
-            
-            def rsi(data, period):
-                delta = np.diff(data)
-                gain = (delta > 0) * delta
-                loss = (delta < 0) * -delta
-                avg_gain = sma(gain, period)
-                avg_loss = sma(loss, period)
-                rs = avg_gain / avg_loss
-                return 100 - (100 / (1 + rs))
-            
-            sma_14 = sma(prices, 14)[-1]
-            rsi_14 = rsi(prices, 14)[-1]
-            
-            return {
-                'SMA': sma_14,
-                'RSI': rsi_14
-            }
-        except Exception as e:
-            logging.error(f"Error in calculate_technical_indicators: {str(e)}")
-            return {'SMA': None, 'RSI': None}
-
-    def predict_price(self, data):
-        try:
-            X = np.array([[i, price] for i, (_, price) in enumerate(data)])
-            y = np.array([price for _, price in data])
-            
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
-            
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X_train_scaled, y_train)
-            
-            next_day = np.array([[len(data), data[-1][1]]])
-            next_day_scaled = scaler.transform(next_day)
-            prediction = model.predict(next_day_scaled)
-            
-            return prediction[0]
-        except Exception as e:
-            logging.error(f"Error in predict_price: {str(e)}")
-            return None
-
-    def get_fundamental_data(self, stock_number):
-        try:
-            # Existing code to get data from Minkabu
-            url = f"https://minkabu.jp/stock/{stock_number}"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            def extract_value(label):
-                element = soup.find('th', string=label)
-                if element and element.find_next('td'):
-                    return element.find_next('td').text.strip().replace(',', '')
-                return None
-            
-            per = extract_value('PER')
-            pbr = extract_value('PBR')
-            dividend_yield = extract_value('配当利回り')
-            
-            # New code to get ROE from Buffett Code
-            buffett_url = f"https://www.buffett-code.com/company/{stock_number}/"
-            buffett_response = requests.get(buffett_url)
-            buffett_soup = BeautifulSoup(buffett_response.content, 'html.parser')
-            
-            roe = None
-            meta_description = buffett_soup.find('meta', attrs={'name': 'description'})
-            if meta_description:
-                content = meta_description['content']
-                roe_match = re.search(r'ROE（([\d.]+)%）', content)
-                if roe_match:
-                    roe = float(roe_match.group(1))
-            
-            return {
-                'PER': float(per) if per else None,
-                'PBR': float(pbr) if pbr else None,
-                'Dividend_Yield': float(dividend_yield.replace('%', '')) if dividend_yield else None,
-                'ROE': roe
-            }
-        except Exception as e:
-            logging.error(f"Error in get_fundamental_data: {str(e)}")
-            return {'PER': None, 'PBR': None, 'Dividend_Yield': None, 'ROE': None}
-
-    def analyze_market_sentiment(self):
-        try:
-            url = "https://www.nikkei.com/markets/kabu/"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Try multiple selectors to find the Nikkei index value
-            nikkei_element = soup.select_one('.economic_value_now, .index-value, .index_value')
-            if nikkei_element:
-                nikkei_value = float(nikkei_element.text.replace(',', '').replace('円', '').strip())
-                nikkei_change_element = soup.select_one('.economic_value_diff, .index-change, .index_change')
-                if nikkei_change_element:
-                    nikkei_change_text = nikkei_change_element.text.replace(',', '').replace('円', '').strip()
-                    nikkei_change = float(nikkei_change_text[1:] if nikkei_change_text.startswith('+') else nikkei_change_text)
-                    nikkei_percent = (nikkei_change / (nikkei_value - nikkei_change)) * 100
-                    
-                    if nikkei_percent > 1:
-                        return "Bullish"
-                    elif nikkei_percent < -1:
-                        return "Bearish"
-                    elif abs(nikkei_percent) > 2:
-                        return "Volatile"
-                    else:
-                        return "Neutral"
-            
-            # Fallback: analyze overall market trend
-            market_trend = self.analyze_overall_market_trend()
-            return f"Based on overall market trend: {market_trend}"
-        
-        except Exception as e:
-            logging.error(f"Error in analyze_market_sentiment: {str(e)}")
-            return "Unable to determine (Error occurred)"
-
-    def analyze_overall_market_trend(self):
-        try:
-            # Use yfinance to get Nikkei 225 data
-            nikkei_data = yf.download("^N225", period="5d")
-            if not nikkei_data.empty:
-                start_price = nikkei_data['Close'].iloc[0]
-                end_price = nikkei_data['Close'].iloc[-1]
-                percent_change = ((end_price - start_price) / start_price) * 100
-                
-                if percent_change > 2:
-                    return "Bullish"
-                elif percent_change < -2:
-                    return "Bearish"
-                elif abs(percent_change) > 3:
-                    return "Volatile"
-                else:
-                    return "Neutral"
+            if lang == 'ja':
+                tokenizer = self.ja_tokenizer
+                model = self.ja_model
             else:
-                return "Neutral (insufficient data)"
-        except Exception as e:
-            logging.error(f"Error in analyze_overall_market_trend: {str(e)}")
-            return "Neutral (Error occurred)"
+                tokenizer = self.en_tokenizer
+                model = self.en_model
+
+            inputs = tokenizer(news['title'], return_tensors="pt", truncation=True, max_length=512)
+            outputs = model(**inputs)
+            sentiment_score = torch.softmax(outputs.logits, dim=1).tolist()[0]
+            sentiments.append(sentiment_score[0])
+
+        return sum(sentiments) / len(sentiments) if sentiments else None
 
     def get_company_name(self):
-        try:
-            url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.content, 'html.parser')
-            title_tag = soup.find('title')
-            if title_tag:
-                title = title_tag.text.strip()
-                company_name = title.split('【')[0].strip()
-                return company_name
-            else:
-                return "Company name not found"
-        except Exception as e:
-            logging.error(f"Error in get_company_name: {str(e)}")
+        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        title_tag = soup.find('title')
+        if title_tag:
+            title = title_tag.text.strip()
+            company_name = title.split('【')[0].strip()
+            return company_name
+        else:
             return "Company name not found"
 
     def get_stock_data(self):
+        ticker = f"{self.stock_number}.T"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=30)
+        
         try:
-            ticker = f"{self.stock_number}.T"
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=30)
-            
             df = yf.download(ticker, start=start_date, end=end_date)
             if df.empty:
                 return None
@@ -318,17 +151,18 @@ class StockUpdateThread(QThread):
             
             stock_data.sort(key=lambda x: x[0], reverse=True)
             return stock_data[:30]
+        
         except Exception as e:
-            logging.error(f"Error in get_stock_data: {str(e)}")
+            print(f"Error retrieving stock data: {e}")
             return None
 
     def scrape_psr_pbr(self):
+        url = f"https://minkabu.jp/stock/{self.stock_number}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
         try:
-            url = f"https://minkabu.jp/stock/{self.stock_number}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -350,13 +184,13 @@ class StockUpdateThread(QThread):
                             pbr = float(td.text.strip().replace('倍', ''))
             
             return psr, pbr
-        except Exception as e:
-            logging.error(f"Error in scrape_psr_pbr: {str(e)}")
+        
+        except (requests.RequestException, ValueError) as e:
+            print(f"Error fetching or parsing PSR/PBR data: {e}")
             return None, None
 
     def stop(self):
         self.running = False
-
 
 class MAGIStockAnalysis(QWidget):
     def __init__(self):
@@ -369,6 +203,11 @@ class MAGIStockAnalysis(QWidget):
         else:
             # we are running in a normal Python environment
             bundle_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        self.ja_tokenizer = BertJapaneseTokenizer.from_pretrained("cl-tohoku/bert-base-japanese")
+        self.ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+        self.en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+        self.en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
         self.flicker_timers = {}
         self.update_thread = None
         self.previous_results = {
@@ -478,8 +317,13 @@ class MAGIStockAnalysis(QWidget):
         content.setReadOnly(True)
         content.setStyleSheet("border: none; background-color: transparent; color: #00ff00;")
         
+        graph_label = QLabel()
+        graph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        graph_label.setStyleSheet("background-color: transparent;")
+        
         layout.addWidget(title_label)
         layout.addWidget(content)
+        layout.addWidget(graph_label)
         
         return component
 
@@ -526,7 +370,7 @@ class MAGIStockAnalysis(QWidget):
             self.update_thread.wait()
 
         # Start new update thread
-        self.update_thread = StockUpdateThread(stock_number)
+        self.update_thread = StockUpdateThread(stock_number, self.ja_tokenizer, self.ja_model, self.en_tokenizer, self.en_model)
         self.update_thread.update_signal.connect(lambda data: self.update_display(data, purchase_price))
         self.update_thread.start()
 
@@ -538,28 +382,20 @@ class MAGIStockAnalysis(QWidget):
             yahoo_sentiment = data['yahoo_sentiment']
             stock_data = data['stock_data']
             psr, pbr = data['psr'], data['pbr']
-            technical_indicators = data['technical_indicators']
-            price_prediction = data['price_prediction']
-            fundamental_data = data['fundamental_data']
-            market_sentiment = data['market_sentiment']
 
-            overall_sentiment = (nikkei_sentiment + yahoo_sentiment) / 2 if nikkei_sentiment is not None and yahoo_sentiment is not None else None
-            overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment is not None else "Insufficient data"
+            overall_sentiment = (nikkei_sentiment + yahoo_sentiment) / 2 if nikkei_sentiment and yahoo_sentiment else None
+            overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment else "Insufficient data"
 
             matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
             psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
-            recommendation = self.get_action_recommendation(
-                overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price,
-                technical_indicators, price_prediction, fundamental_data, market_sentiment
-            )
+            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, purchase_price)
 
             # Update CASPER
             casper_content = (
                 f"Company: {company_name}\n\n"
                 f"Nikkei Sentiment: {self.sentiment_to_text(nikkei_sentiment)}\n"
                 f"Yahoo Sentiment: {self.sentiment_to_text(yahoo_sentiment)}\n"
-                f"Overall Sentiment: {overall_sentiment_text}\n\n"
-                f"Market Sentiment: {market_sentiment}"
+                f"Overall Sentiment: {overall_sentiment_text}"
             )
             if self.has_content_changed('casper', casper_content):
                 self.update_component_with_flicker(self.casper, casper_content)
@@ -567,18 +403,13 @@ class MAGIStockAnalysis(QWidget):
                 self.casper.findChild(QTextEdit).setText(casper_content)
 
             # Update BALTHASAR
-            sma = technical_indicators['SMA'] if technical_indicators and 'SMA' in technical_indicators else None
-            rsi = technical_indicators['RSI'] if technical_indicators and 'RSI' in technical_indicators else None
             balthasar_content = (
                 f"30-Day Pattern: {matched_pattern}\n"
-                f"Recommended Action: {recommendation}\n\n"
-                f"Technical Indicators:\n"
-                f"SMA: {f'{sma:.2f}' if sma is not None else 'N/A'}\n"
-                f"RSI: {f'{rsi:.2f}' if rsi is not None else 'N/A'}\n\n"
-                f"Price Prediction: ¥{f'{price_prediction:.2f}' if price_prediction is not None else 'N/A'}"
+                f"Recommended Action: {recommendation}"
             )
             if self.has_content_changed('balthasar', balthasar_content):
                 self.update_component_with_flicker(self.balthasar, balthasar_content)
+                self.update_graph(self.balthasar, stock_data)
             else:
                 self.balthasar.findChild(QTextEdit).setText(balthasar_content)
 
@@ -591,13 +422,9 @@ class MAGIStockAnalysis(QWidget):
             melchior_content = (
                 f"Current Price: {current_price_text}\n"
                 f"Purchase Price: {purchase_price_text}\n"
-                f"Price Difference: {self.calculate_price_difference(current_price, purchase_price)}\n\n"
+                f"Price Difference: {self.calculate_price_difference(current_price, purchase_price)}\n"
                 f"PSR: {psr_text} - {psr_comment}\n"
-                f"PBR: {pbr_text} - {pbr_comment}\n\n"
-                f"Fundamental Data:\n"
-                f"PER: {fundamental_data.get('PER', 'N/A')}\n"
-                f"Dividend Yield: {fundamental_data.get('Dividend_Yield', 'N/A')}%\n"
-                f"ROE: {fundamental_data.get('ROE', 'N/A')}%"
+                f"PBR: {pbr_text} - {pbr_comment}"
             )
             if self.has_content_changed('melchior', melchior_content):
                 self.update_component_with_flicker(self.melchior, melchior_content)
@@ -605,8 +432,39 @@ class MAGIStockAnalysis(QWidget):
                 self.melchior.findChild(QTextEdit).setText(melchior_content)
 
         except Exception as e:
-            logging.error(f"Error in update_display: {str(e)}")
-            self.show_error(f"An error occurred while updating the display: {str(e)}")
+            print(f"Error in update_display: {e}")
+            self.show_error(f"An error occurred while updating the display: {e}")
+
+
+    def update_graph(self, component, stock_data):
+        if stock_data:
+            dates = [date for date, _ in stock_data]
+            prices = [price for _, price in stock_data]
+
+            fig, ax = plt.subplots(figsize=(8, 4), facecolor='#001a1a')
+            ax.plot(dates, prices, color='#00ff00')
+            ax.set_facecolor('#001a1a')
+            ax.tick_params(axis='x', colors='#00ff00')
+            ax.tick_params(axis='y', colors='#00ff00')
+            ax.spines['bottom'].set_color('#00ff00')
+            ax.spines['top'].set_color('#00ff00')
+            ax.spines['left'].set_color('#00ff00')
+            ax.spines['right'].set_color('#00ff00')
+            plt.title('30-Day Stock Pattern', color='#00ff00')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = BytesIO()
+            plt.savefig(buf, format='png')
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            
+            graph_label = component.findChild(QLabel)
+            graph_label.setPixmap(pixmap)
+            
+            plt.close(fig)
+
 
     def update_component_with_flicker(self, component, new_text):
         self.start_flicker(component)
@@ -766,8 +624,7 @@ class MAGIStockAnalysis(QWidget):
         
         return psr_score, pbr_score, psr_comment, pbr_comment
 
-    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, purchase_price,
-                                technical_indicators, price_prediction, fundamental_data, market_sentiment):
+    def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, purchase_price=None):
         if not stock_price_data:
             return "Insufficient data for recommendation"
         
@@ -829,17 +686,6 @@ class MAGIStockAnalysis(QWidget):
             else:
                 action = "Monitor"
                 explanation = "Mixed signals. Monitor the stock for a clearer trend before making a decision."
-
-        # Include new factors in the decision-making process
-        if technical_indicators['RSI'] > 70:
-            explanation += " RSI indicates the stock may be overbought."
-        elif technical_indicators['RSI'] < 30:
-            explanation += " RSI indicates the stock may be oversold."
-
-        if market_sentiment == "Bullish":
-            explanation += " Overall market sentiment is bullish."
-        elif market_sentiment == "Bearish":
-            explanation += " Overall market sentiment is bearish."
 
         return f"{action}\nExplanation: {explanation}"
 
