@@ -49,10 +49,34 @@ class StockUpdateThread(QThread):
         else:
             return self.train_ml_model()
 
-    def train_ml_model(self):
-        # Fetch historical data
+    def get_jpx_nikkei_data(self):
+        # JPX-Nikkei Index 400 ticker
+        jpx_nikkei_ticker = "^NKJ400"
+        
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*2)  # 2 years of data
+        start_date = end_date - timedelta(days=365*5)  # 5 years of data
+        
+        try:
+            df = yf.download(jpx_nikkei_ticker, start=start_date, end=end_date)
+            
+            if df.empty:
+                logging.warning(f"No data retrieved for JPX-Nikkei Index 400")
+                return None
+            
+            # Calculate additional features
+            df['JPX_Returns'] = df['Close'].pct_change()
+            df['JPX_Volatility'] = df['Close'].rolling(window=30).std()
+            
+            return df
+        except Exception as e:
+            logging.error(f"Error retrieving JPX-Nikkei Index 400 data: {e}")
+            return None
+
+
+    def train_ml_model(self):
+        # Fetch historical data for the stock
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365*5)  # 5 years of data
         df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
 
         if df.empty:
@@ -67,7 +91,7 @@ class StockUpdateThread(QThread):
         df['Return'] = df['Close'].pct_change()
         
         # Prepare features and target
-        features = ['Open', 'High', 'Low', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'Return']
+        features = ['Open', 'High', 'Low', 'Close', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'Return']
         
         # Shift the target variable (next day's closing price)
         df['Target'] = df['Close'].shift(-1)
@@ -101,10 +125,12 @@ class StockUpdateThread(QThread):
         mse = mean_squared_error(y_test, y_pred)
         logging.info(f"Model MSE: {mse}")
         
-        # Save model
+        # Save model and scaler
         joblib.dump(model, f'rf_model_{self.stock_number}.joblib')
+        joblib.dump(scaler, f'scaler_{self.stock_number}.joblib')
         
-        return model
+        return model, scaler
+
 
     def predict_next_day_price(self, current_data):
         if self.ml_model is None:
@@ -116,7 +142,7 @@ class StockUpdateThread(QThread):
             current_data['Open'], 
             current_data['High'], 
             current_data['Low'], 
-            current_data['Volume'] if current_data['Volume'] is not None else 0,  # Use 0 if volume is None
+            current_data['Close'],
             current_data['RSI'], 
             current_data['MACD'], 
             current_data['BB_High'], 
@@ -124,9 +150,18 @@ class StockUpdateThread(QThread):
             current_data['Return']
         ])
         input_data = input_data.reshape(1, -1)
+
+        # Load the scaler
+        scaler_path = f'scaler_{self.stock_number}.joblib'
+        if os.path.exists(scaler_path):
+            scaler = joblib.load(scaler_path)
+            input_data_scaled = scaler.transform(input_data)
+        else:
+            logging.warning(f"Scaler not found for stock {self.stock_number}. Using unscaled data.")
+            input_data_scaled = input_data
         
         # Make prediction
-        prediction = self.ml_model.predict(input_data)
+        prediction = self.ml_model.predict(input_data_scaled)
         return prediction[0]
 
 
@@ -144,7 +179,6 @@ class StockUpdateThread(QThread):
                     'High': max(prices),
                     'Low': min(prices),
                     'Close': current_price,
-                    'Volume': None,  # We don't have volume data
                     'RSI': momentum.RSIIndicator(pd.Series(prices)).rsi().iloc[-1],
                     'MACD': trend.MACD(pd.Series(prices)).macd().iloc[-1],
                     'BB_High': volatility.BollingerBands(pd.Series(prices)).bollinger_hband().iloc[-1],
@@ -155,7 +189,7 @@ class StockUpdateThread(QThread):
                 data['next_day_prediction'] = next_day_prediction
             
             self.update_signal.emit(data)
-            time.sleep(60)  # Update every 60 seconds
+            time.sleep(1)  # Update every second
 
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
@@ -621,6 +655,7 @@ class MAGIStockAnalysis(QWidget):
             psr, pbr = data['psr'], data['pbr']
             roa = data['roa']
             roe = data['roe']
+            next_day_prediction = data.get('next_day_prediction')  # Get the prediction
 
             overall_sentiment = (self.nikkei_sentiment + self.yahoo_sentiment) / 2 if self.nikkei_sentiment is not None and self.yahoo_sentiment is not None else None
             overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment is not None else "Insufficient data"
@@ -630,11 +665,16 @@ class MAGIStockAnalysis(QWidget):
             recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, roa, roe, purchase_price)
 
             # Update CASPER
+            next_day_prediction_text = f"¥{next_day_prediction:.2f}" if next_day_prediction is not None else "N/A"
+            prediction_change = ((next_day_prediction - current_price) / current_price * 100) if next_day_prediction is not None and current_price is not None else None
+            prediction_change_text = f"{prediction_change:.2f}%" if prediction_change is not None else "N/A"
+
             casper_content = f"""
                 <p>Company: {company_name}</p>
                 <p><a href='nikkei'>Nikkei Sentiment: {self.sentiment_to_text(self.nikkei_sentiment)}</a></p>
                 <p><a href='yahoo'>Yahoo Sentiment: {self.sentiment_to_text(self.yahoo_sentiment)}</a></p>
                 <p>Overall Sentiment: {overall_sentiment_text}</p>
+                <p>Next Day Prediction: {next_day_prediction_text} ({prediction_change_text})</p>
             """
             casper_browser = self.casper.findChild(QTextBrowser)
             if self.has_content_changed('casper', casper_content):
