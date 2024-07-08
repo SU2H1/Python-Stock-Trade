@@ -9,22 +9,17 @@ from langdetect import detect
 import pandas as pd
 import yfinance as yf
 import sys
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QMainWindow
-from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QMainWindow, QDialog, QTextBrowser
+from PyQt6.QtGui import QFont, QColor, QPalette, QPixmap
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
 import os
-import sys
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt6.QtGui import QPixmap
 from io import BytesIO
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QMainWindow, QDialog, QTextBrowser
-from PyQt6.QtGui import QFont, QColor, QPalette
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QEventLoop
-from PyQt6.QtWidgets import QTextBrowser
 import re
 import time
 import logging
+from ta import momentum, trend, volatility
 
 logging.basicConfig(level=logging.INFO)
 
@@ -129,7 +124,7 @@ class StockUpdateThread(QThread):
         soup = BeautifulSoup(response.content, 'html.parser')
         news_items = soup.find_all('a', href=lambda href: href and "/nkd/company/article/" in href)
         news_data = []
-        for item in news_items[:5]:  # Get latest 5 news items
+        for item in news_items[:10]:  # Get latest 10 news items
             title = item.text.strip()
             url = "https://www.nikkei.com" + item['href']
             news_data.append({"title": title, "url": url})
@@ -141,7 +136,7 @@ class StockUpdateThread(QThread):
         soup = BeautifulSoup(response.content, 'html.parser')
         news_items = soup.find_all('a', href=lambda href: href and "/news/" in href)
         news_data = []
-        for item in news_items[:5]:  # Get latest 5 news items
+        for item in news_items[:10]:  # Get latest 10 news items
             title = item.text.strip()
             article_url = item['href']
             if not article_url.startswith('http'):
@@ -334,6 +329,35 @@ class MAGIStockAnalysis(QWidget):
             self.showNormal()
         super().keyPressEvent(event)
 
+
+    def analyze_stock(self):
+        stock_number = self.stock_input.text()
+        purchase_price = self.price_input.text()
+        if purchase_price.lower() == 'n/a' or purchase_price == '':
+            purchase_price = None
+        else:
+            try:
+                purchase_price = float(purchase_price)
+            except ValueError:
+                self.show_error("Invalid purchase price. Using N/A.")
+                purchase_price = None
+
+        # Start flickering
+        for component in [self.casper, self.balthasar, self.melchior]:
+            self.start_flicker(component)
+            component.findChild(QTextBrowser).setText("Loading...")
+
+        # Stop existing update thread if running
+        if self.update_thread and self.update_thread.isRunning():
+            self.update_thread.stop()
+            self.update_thread.wait()
+
+        # Start new update thread
+        self.update_thread = StockUpdateThread(stock_number, self.ja_tokenizer, self.ja_model, self.en_tokenizer, self.en_model)
+        self.update_thread.update_signal.connect(lambda data: self.update_display(data, purchase_price))
+        self.update_thread.start()
+
+
     def has_content_changed(self, component_name, new_content):
         if self.previous_results[component_name] != new_content:
             self.previous_results[component_name] = new_content
@@ -442,6 +466,34 @@ class MAGIStockAnalysis(QWidget):
         
         return component
 
+    def show_detailed_explanation(self, explanation):
+        detail_popup = QDialog(self)
+        detail_popup.setWindowTitle("Detailed Recommendation Explanation")
+        detail_popup.setStyleSheet("background-color: #001a1a; color: #00ff00;")
+        
+        layout = QVBoxLayout()
+        
+        text_browser = QTextBrowser()
+        text_browser.setHtml(f"<p>{explanation}</p>")
+        text_browser.setStyleSheet("background-color: #002a2a; border: none;")
+        
+        layout.addWidget(text_browser)
+        
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(detail_popup.close)
+        close_button.setStyleSheet("""
+            background-color: #001a1a;
+            color: #00ff00;
+            border: 2px solid #ff8c00;
+            border-radius: 5px;
+            padding: 5px;
+        """)
+        layout.addWidget(close_button)
+        
+        detail_popup.setLayout(layout)
+        detail_popup.setGeometry(200, 200, 400, 300)
+        detail_popup.exec()
+
 
     def start_flicker(self, component):
         if component not in self.flicker_timers:
@@ -462,33 +514,6 @@ class MAGIStockAnalysis(QWidget):
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #005a5a;")  # Brighter color
         else:
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
-
-    def analyze_stock(self):
-        stock_number = self.stock_input.text()
-        purchase_price = self.price_input.text()
-        if purchase_price.lower() == 'n/a' or purchase_price == '':
-            purchase_price = None
-        else:
-            try:
-                purchase_price = float(purchase_price)
-            except ValueError:
-                self.show_error("Invalid purchase price. Using N/A.")
-                purchase_price = None
-
-        # Start flickering
-        for component in [self.casper, self.balthasar, self.melchior]:
-            self.start_flicker(component)
-            component.findChild(QTextEdit).setText("Loading...")
-
-        # Stop existing update thread if running
-        if self.update_thread and self.update_thread.isRunning():
-            self.update_thread.stop()
-            self.update_thread.wait()
-
-        # Start new update thread
-        self.update_thread = StockUpdateThread(stock_number, self.ja_tokenizer, self.ja_model, self.en_tokenizer, self.en_model)
-        self.update_thread.update_signal.connect(lambda data: self.update_display(data, purchase_price))
-        self.update_thread.start()
 
     def update_display(self, data, purchase_price):
         try:
@@ -524,15 +549,36 @@ class MAGIStockAnalysis(QWidget):
                 casper_browser.setHtml(casper_content)
 
             # Update BALTHASAR
-            balthasar_content = f"""
-                <p>30-Day Pattern: {matched_pattern}</p>
-                <p>Recommended Action: {recommendation}</p>
+            balthasar_browser = self.balthasar.findChild(QTextBrowser)
+            
+            recommendation_parts = recommendation.split('\n', 1)
+            action = recommendation_parts[0]
+            explanation = recommendation_parts[1] if len(recommendation_parts) > 1 else ""
+            
+            key_metrics = f"""
+            <p>PSR: {psr:.2f} | PBR: {pbr:.2f}</p>
+            <p>ROA: {roa:.2f}% | ROE: {roe:.2f}%</p>
             """
+
+            balthasar_content = f"""
+            <p><strong>Recommendation: {action}</strong></p>
+            <p>Pattern: {matched_pattern}</p>
+            {key_metrics}
+            <p><a href='detailed_explanation'>Click for detailed explanation</a></p>
+            """
+            
             if self.has_content_changed('balthasar', balthasar_content):
                 self.update_component_with_flicker(self.balthasar, balthasar_content)
                 self.update_graph(self.balthasar, stock_data)
             else:
-                self.balthasar.findChild(QTextBrowser).setHtml(balthasar_content)
+                balthasar_browser.setHtml(balthasar_content)
+            
+            # Disconnect any existing connections to avoid multiple connections
+            try:
+                balthasar_browser.anchorClicked.disconnect()
+            except:
+                pass
+            balthasar_browser.anchorClicked.connect(lambda url: self.show_detailed_explanation(explanation) if url.toString() == 'detailed_explanation' else None)
 
             # Update MELCHIOR
             current_price_text = f"¥{current_price:.2f}" if current_price is not None else "N/A"
@@ -551,11 +597,11 @@ class MAGIStockAnalysis(QWidget):
                 <p>ROA: {roa_text}</p>
                 <p>ROE: {roe_text}</p>
             """
+            melchior_browser = self.melchior.findChild(QTextBrowser)
             if self.has_content_changed('melchior', melchior_content):
                 self.update_component_with_flicker(self.melchior, melchior_content)
             else:
-                self.melchior.findChild(QTextBrowser).setHtml(melchior_content)
-
+                melchior_browser.setHtml(melchior_content)
 
         except Exception as e:
             print(f"Error in update_display: {e}")
