@@ -20,8 +20,13 @@ import re
 import time
 import logging
 from ta import momentum, trend, volatility
-logging.basicConfig(level=logging.INFO)
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+import joblib
 
+logging.basicConfig(level=logging.INFO)
 
 
 class StockUpdateThread(QThread):
@@ -35,49 +40,122 @@ class StockUpdateThread(QThread):
         self.en_tokenizer = en_tokenizer
         self.en_model = en_model
         self.running = True
+        self.ml_model = self.load_or_train_ml_model()
+
+    def load_or_train_ml_model(self):
+        model_path = f'rf_model_{self.stock_number}.joblib'
+        if os.path.exists(model_path):
+            return joblib.load(model_path)
+        else:
+            return self.train_ml_model()
+
+    def train_ml_model(self):
+        # Fetch historical data
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365*2)  # 2 years of data
+        df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+
+        if df.empty:
+            logging.warning(f"No data retrieved for stock {self.stock_number}")
+            return None
+
+        # Feature engineering
+        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = trend.MACD(df['Close']).macd()
+        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+        df['Return'] = df['Close'].pct_change()
+        
+        # Prepare features and target
+        features = ['Open', 'High', 'Low', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'Return']
+        
+        # Shift the target variable (next day's closing price)
+        df['Target'] = df['Close'].shift(-1)
+        
+        # Drop rows with NaN values
+        df.dropna(inplace=True)
+        
+        X = df[features]
+        y = df['Target']
+        
+        # Ensure X and y have the same number of samples
+        if len(X) != len(y):
+            min_len = min(len(X), len(y))
+            X = X.iloc[:min_len]
+            y = y.iloc[:min_len]
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Train model
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+        model.fit(X_train_scaled, y_train)
+        
+        # Evaluate model
+        y_pred = model.predict(X_test_scaled)
+        mse = mean_squared_error(y_test, y_pred)
+        logging.info(f"Model MSE: {mse}")
+        
+        # Save model
+        joblib.dump(model, f'rf_model_{self.stock_number}.joblib')
+        
+        return model
+
+    def predict_next_day_price(self, current_data):
+        if self.ml_model is None:
+            logging.warning("ML model is not available. Unable to make prediction.")
+            return None
+
+        # Prepare the input data
+        input_data = np.array([
+            current_data['Open'], 
+            current_data['High'], 
+            current_data['Low'], 
+            current_data['Volume'] if current_data['Volume'] is not None else 0,  # Use 0 if volume is None
+            current_data['RSI'], 
+            current_data['MACD'], 
+            current_data['BB_High'], 
+            current_data['BB_Low'], 
+            current_data['Return']
+        ])
+        input_data = input_data.reshape(1, -1)
+        
+        # Make prediction
+        prediction = self.ml_model.predict(input_data)
+        return prediction[0]
 
 
     def run(self):
         while self.running:
             data = self.fetch_latest_data()
+            
+            # Add ML prediction
+            current_price = data['current_price']
+            stock_data = data['stock_data']
+            if stock_data:
+                dates, prices = zip(*stock_data)
+                latest_data = {
+                    'Open': prices[0],  # Assuming the first price is the opening price
+                    'High': max(prices),
+                    'Low': min(prices),
+                    'Close': current_price,
+                    'Volume': None,  # We don't have volume data
+                    'RSI': momentum.RSIIndicator(pd.Series(prices)).rsi().iloc[-1],
+                    'MACD': trend.MACD(pd.Series(prices)).macd().iloc[-1],
+                    'BB_High': volatility.BollingerBands(pd.Series(prices)).bollinger_hband().iloc[-1],
+                    'BB_Low': volatility.BollingerBands(pd.Series(prices)).bollinger_lband().iloc[-1],
+                    'Return': (current_price - prices[1]) / prices[1] if len(prices) > 1 else 0
+                }
+                next_day_prediction = self.predict_next_day_price(latest_data)
+                data['next_day_prediction'] = next_day_prediction
+            
             self.update_signal.emit(data)
             time.sleep(60)  # Update every 60 seconds
-
-
-    def scrape_roa_roe(self):
-        url = f"https://minkabu.jp/stock/{self.stock_number}/settlement"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Find the script tag containing the chart data
-            chart_data = soup.find('settlement-chart-profitability')
-            if chart_data:
-                chart_elements = chart_data.get(':chart-elements')
-                if chart_elements:
-                    # Remove escaped quotes and parse the JSON
-                    chart_json = json.loads(chart_elements.replace('&quot;', '"'))
-                    
-                    # Get the most recent ROA and ROE values
-                    roa = chart_json['roa'][-1] if 'roa' in chart_json and chart_json['roa'] else None
-                    roe = chart_json['roe'][-1] if 'roe' in chart_json and chart_json['roe'] else None
-                    
-                    logging.info(f"Scraped ROA: {roa}, ROE: {roe}")
-                    return roa, roe
-            
-            logging.warning("ROA and ROE data not found in chart elements")
-            return None, None
-        
-        except Exception as e:
-            logging.error(f"Error in scrape_roa_roe: {e}")
-            return None, None
-
 
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
@@ -104,7 +182,6 @@ class StockUpdateThread(QThread):
             'roe': roe
         }
 
-
     def get_current_stock_price(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         response = requests.get(url)
@@ -118,7 +195,6 @@ class StockUpdateThread(QThread):
                 return None
         return None
 
-
     def scrape_nikkei_news(self):
         url = f"https://www.nikkei.com/nkd/company/news/?scode={self.stock_number}&ba=1"
         response = requests.get(url)
@@ -130,7 +206,6 @@ class StockUpdateThread(QThread):
             url = "https://www.nikkei.com" + item['href']
             news_data.append({"title": title, "url": url})
         return news_data
-
 
     def scrape_yahoo_finance_news(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T/news"
@@ -145,7 +220,6 @@ class StockUpdateThread(QThread):
                 article_url = "https://finance.yahoo.co.jp" + article_url
             news_data.append({"title": title, "url": article_url})
         return news_data
-
 
     def analyze_sentiment(self, news_data):
         sentiments = []
@@ -169,7 +243,6 @@ class StockUpdateThread(QThread):
 
         return sum(sentiments) / len(sentiments) if sentiments else None
 
-
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         response = requests.get(url)
@@ -181,7 +254,6 @@ class StockUpdateThread(QThread):
             return company_name
         else:
             return "Company name not found"
-
 
     def get_stock_data(self):
         ticker = f"{self.stock_number}.T"
@@ -205,7 +277,6 @@ class StockUpdateThread(QThread):
         except Exception as e:
             logging.error(f"Error retrieving stock data for {ticker}: {e}")
             return None
-
 
     def scrape_psr_pbr(self):
         url = f"https://minkabu.jp/stock/{self.stock_number}"
@@ -240,9 +311,8 @@ class StockUpdateThread(QThread):
             print(f"Error fetching or parsing PSR/PBR data: {e}")
             return None, None
 
-
-    def scrape_roe(self):
-        url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
+    def scrape_roa_roe(self):
+        url = f"https://minkabu.jp/stock/{self.stock_number}/settlement"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -250,26 +320,30 @@ class StockUpdateThread(QThread):
         try:
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find the ROE value
-            roe_element = soup.find('dt', string='ROE')
-            if roe_element:
-                roe_value = roe_element.find_next('dd').text.strip()
-                # Remove the percentage sign and convert to float
-                roe = float(roe_value.replace('%', ''))
-                return roe
+            chart_data = soup.find('settlement-chart-profitability')
+            if chart_data:
+                chart_elements = chart_data.get(':chart-elements')
+                if chart_elements:
+                    chart_json = json.loads(chart_elements.replace('&quot;', '"'))
+                    
+                    roa = chart_json['roa'][-1] if 'roa' in chart_json and chart_json['roa'] else None
+                    roe = chart_json['roe'][-1] if 'roe' in chart_json and chart_json['roe'] else None
+                    
+                    logging.info(f"Scraped ROA: {roa}, ROE: {roe}")
+                    return roa, roe
             
-            return None
+            logging.warning("ROA and ROE data not found in chart elements")
+            return None, None
         
-        except (requests.RequestException, ValueError) as e:
-            print(f"Error fetching or parsing ROE data: {e}")
-            return None
-
+        except Exception as e:
+            logging.error(f"Error in scrape_roa_roe: {e}")
+            return None, None
 
     def stop(self):
         self.running = False
-
 
 
 class SentimentPopup(QDialog):
