@@ -20,7 +20,6 @@ import re
 import time
 import logging
 from ta import momentum, trend, volatility
-
 logging.basicConfig(level=logging.INFO)
 
 
@@ -79,6 +78,7 @@ class StockUpdateThread(QThread):
             logging.error(f"Error in scrape_roa_roe: {e}")
             return None, None
 
+
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
         company_name = self.get_company_name()
@@ -118,6 +118,7 @@ class StockUpdateThread(QThread):
                 return None
         return None
 
+
     def scrape_nikkei_news(self):
         url = f"https://www.nikkei.com/nkd/company/news/?scode={self.stock_number}&ba=1"
         response = requests.get(url)
@@ -129,6 +130,7 @@ class StockUpdateThread(QThread):
             url = "https://www.nikkei.com" + item['href']
             news_data.append({"title": title, "url": url})
         return news_data
+
 
     def scrape_yahoo_finance_news(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T/news"
@@ -143,6 +145,7 @@ class StockUpdateThread(QThread):
                 article_url = "https://finance.yahoo.co.jp" + article_url
             news_data.append({"title": title, "url": article_url})
         return news_data
+
 
     def analyze_sentiment(self, news_data):
         sentiments = []
@@ -166,6 +169,7 @@ class StockUpdateThread(QThread):
 
         return sum(sentiments) / len(sentiments) if sentiments else None
 
+
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         response = requests.get(url)
@@ -177,6 +181,7 @@ class StockUpdateThread(QThread):
             return company_name
         else:
             return "Company name not found"
+
 
     def get_stock_data(self):
         ticker = f"{self.stock_number}.T"
@@ -198,6 +203,7 @@ class StockUpdateThread(QThread):
         except Exception as e:
             print(f"Error retrieving stock data: {e}")
             return None
+
 
     def scrape_psr_pbr(self):
         url = f"https://minkabu.jp/stock/{self.stock_number}"
@@ -231,7 +237,8 @@ class StockUpdateThread(QThread):
         except (requests.RequestException, ValueError) as e:
             print(f"Error fetching or parsing PSR/PBR data: {e}")
             return None, None
-        
+
+
     def scrape_roe(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         headers = {
@@ -257,8 +264,10 @@ class StockUpdateThread(QThread):
             print(f"Error fetching or parsing ROE data: {e}")
             return None
 
+
     def stop(self):
         self.running = False
+
 
 
 class SentimentPopup(QDialog):
@@ -295,6 +304,8 @@ class SentimentPopup(QDialog):
 
         self.setLayout(layout)
 
+
+
 class MAGIStockAnalysis(QWidget):
     def __init__(self):
         super().__init__()
@@ -323,6 +334,7 @@ class MAGIStockAnalysis(QWidget):
 
         self.showFullScreen()
         self.setWindowState(Qt.WindowState.WindowFullScreen)
+
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
@@ -363,6 +375,7 @@ class MAGIStockAnalysis(QWidget):
             self.previous_results[component_name] = new_content
             return True
         return False
+
 
     def initUI(self):
         self.setWindowTitle('MAGI Stock Analysis System')
@@ -437,6 +450,7 @@ class MAGIStockAnalysis(QWidget):
 
         self.setLayout(main_layout)
 
+
     def create_magi_component(self, title):
         component = QWidget()
         component.setStyleSheet("""
@@ -465,6 +479,7 @@ class MAGIStockAnalysis(QWidget):
         layout.addWidget(graph_label)
         
         return component
+
 
     def show_detailed_explanation(self, explanation):
         detail_popup = QDialog(self)
@@ -502,11 +517,13 @@ class MAGIStockAnalysis(QWidget):
             timer.start(100)  # Flicker every 100ms
             self.flicker_timers[component] = timer
 
+
     def stop_flicker(self, component):
         if component in self.flicker_timers:
             self.flicker_timers[component].stop()
             del self.flicker_timers[component]
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
+
 
     def flicker_effect(self, component):
         current_style = component.styleSheet()
@@ -514,6 +531,7 @@ class MAGIStockAnalysis(QWidget):
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #005a5a;")  # Brighter color
         else:
             component.setStyleSheet("border: 2px solid #ff8c00; background-color: #001a1a;")
+
 
     def update_display(self, data, purchase_price):
         try:
@@ -672,6 +690,7 @@ class MAGIStockAnalysis(QWidget):
         for component in [self.casper, self.balthasar, self.melchior]:
             component.findChild(QTextEdit).setText(message)
 
+
     def sentiment_to_text(self, score):
         if score is None:
             return "No data"
@@ -685,6 +704,7 @@ class MAGIStockAnalysis(QWidget):
             return "Positive"
         else:
             return "Very Positive"
+
 
     def identify_pattern(self, stock_data):
         if stock_data is None or len(stock_data) < 30:
@@ -733,6 +753,7 @@ class MAGIStockAnalysis(QWidget):
         else:
             return "No clear pattern identified"
 
+
     def evaluate_psr_pbr(self, psr, pbr):
         psr_score = 0
         pbr_score = 0
@@ -764,6 +785,7 @@ class MAGIStockAnalysis(QWidget):
             pbr_comment = "PBR data not available."
         
         return psr_score, pbr_score, psr_comment, pbr_comment
+
 
     def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, roa, roe, purchase_price=None):
         if not stock_price_data:
@@ -823,6 +845,7 @@ class MAGIStockAnalysis(QWidget):
         
         return f"{action}\nExplanation: {explanation}"
 
+
     def calculate_price_difference(self, current_price, purchase_price):
         if purchase_price is None:
             return "N/A"
@@ -830,11 +853,14 @@ class MAGIStockAnalysis(QWidget):
         price_percentage = (price_difference / purchase_price) * 100
         return f"¥{price_difference:.2f} ({price_percentage:.2f}%)"
 
+
     def closeEvent(self, event):
         if self.update_thread and self.update_thread.isRunning():
             self.update_thread.stop()
             self.update_thread.wait()
         event.accept()
+
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
