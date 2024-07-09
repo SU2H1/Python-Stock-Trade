@@ -18,15 +18,27 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from io import BytesIO
 import re
 import time
-import logging
 from ta import momentum, trend, volatility
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 import joblib
+import atexit
+import tempfile
 
-logging.basicConfig(level=logging.INFO)
+
+def cleanup():
+    temp_dir = tempfile.gettempdir()
+    for filename in os.listdir(temp_dir):
+        if filename.startswith('_MEI') or filename.startswith('magi_'):
+            try:
+                os.remove(os.path.join(temp_dir, filename))
+            except:
+                pass
+
+atexit.register(cleanup)
+
 
 
 class StockUpdateThread(QThread):
@@ -47,7 +59,8 @@ class StockUpdateThread(QThread):
         if os.path.exists(model_path):
             return joblib.load(model_path)
         else:
-            return self.train_ml_model()
+            model, _ = self.train_ml_model()  # Ignore the scaler returned by train_ml_model
+            return model
 
     def get_jpx_nikkei_data(self):
         # JPX-Nikkei Index 400 ticker
@@ -59,17 +72,13 @@ class StockUpdateThread(QThread):
         try:
             df = yf.download(jpx_nikkei_ticker, start=start_date, end=end_date)
             
-            if df.empty:
-                logging.warning(f"No data retrieved for JPX-Nikkei Index 400")
-                return None
-            
             # Calculate additional features
             df['JPX_Returns'] = df['Close'].pct_change()
             df['JPX_Volatility'] = df['Close'].rolling(window=30).std()
             
             return df
         except Exception as e:
-            logging.error(f"Error retrieving JPX-Nikkei Index 400 data: {e}")
+            print(f"Error retrieving JPX-Nikkei Index 400 data: {e}")
             return None
 
 
@@ -78,11 +87,6 @@ class StockUpdateThread(QThread):
         end_date = datetime.now()
         start_date = end_date - timedelta(days=365*5)  # 5 years of data
         df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
-
-        if df.empty:
-            logging.warning(f"No data retrieved for stock {self.stock_number}")
-            return None
-
         # Feature engineering
         df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
         df['MACD'] = trend.MACD(df['Close']).macd()
@@ -120,11 +124,6 @@ class StockUpdateThread(QThread):
         model = RandomForestRegressor(n_estimators=100, random_state=42)
         model.fit(X_train_scaled, y_train)
         
-        # Evaluate model
-        y_pred = model.predict(X_test_scaled)
-        mse = mean_squared_error(y_test, y_pred)
-        logging.info(f"Model MSE: {mse}")
-        
         # Save model and scaler
         joblib.dump(model, f'rf_model_{self.stock_number}.joblib')
         joblib.dump(scaler, f'scaler_{self.stock_number}.joblib')
@@ -133,10 +132,6 @@ class StockUpdateThread(QThread):
 
 
     def predict_next_day_price(self, current_data):
-        if self.ml_model is None:
-            logging.warning("ML model is not available. Unable to make prediction.")
-            return None
-
         # Prepare the input data
         input_data = np.array([
             current_data['Open'], 
@@ -157,9 +152,9 @@ class StockUpdateThread(QThread):
             scaler = joblib.load(scaler_path)
             input_data_scaled = scaler.transform(input_data)
         else:
-            logging.warning(f"Scaler not found for stock {self.stock_number}. Using unscaled data.")
+            print(f"Scaler not found for stock {self.stock_number}. Using unscaled data.")
             input_data_scaled = input_data
-        
+
         # Make prediction
         prediction = self.ml_model.predict(input_data_scaled)
         return prediction[0]
@@ -297,7 +292,7 @@ class StockUpdateThread(QThread):
         try:
             df = yf.download(ticker, start=start_date, end=end_date)
             if df.empty:
-                logging.warning(f"No data retrieved for stock {ticker}")
+                print(f"No data retrieved for stock {ticker}")
                 return None
             
             df = df.reset_index()
@@ -305,12 +300,12 @@ class StockUpdateThread(QThread):
             stock_data = [(row['Date'], row['Close']) for _, row in df.iterrows()]
             
             stock_data.sort(key=lambda x: x[0], reverse=True)
-            logging.info(f"Retrieved {len(stock_data)} data points for stock {ticker}")
+            print(f"Retrieved {len(stock_data)} data points for stock {ticker}")
             return stock_data[:60]  # Return up to 60 days of data
-        
         except Exception as e:
-            logging.error(f"Error retrieving stock data for {ticker}: {e}")
+            print(f"Error retrieving stock data for {ticker}: {e}")
             return None
+
 
     def scrape_psr_pbr(self):
         url = f"https://minkabu.jp/stock/{self.stock_number}"
@@ -340,10 +335,10 @@ class StockUpdateThread(QThread):
                             pbr = float(td.text.strip().replace('倍', ''))
             
             return psr, pbr
-        
-        except (requests.RequestException, ValueError) as e:
+        except Exception as e:
             print(f"Error fetching or parsing PSR/PBR data: {e}")
             return None, None
+
 
     def scrape_roa_roe(self):
         url = f"https://minkabu.jp/stock/{self.stock_number}/settlement"
@@ -366,14 +361,13 @@ class StockUpdateThread(QThread):
                     roa = chart_json['roa'][-1] if 'roa' in chart_json and chart_json['roa'] else None
                     roe = chart_json['roe'][-1] if 'roe' in chart_json and chart_json['roe'] else None
                     
-                    logging.info(f"Scraped ROA: {roa}, ROE: {roe}")
+                    print(f"Scraped ROA: {roa}, ROE: {roe}")
                     return roa, roe
             
-            logging.warning("ROA and ROE data not found in chart elements")
+            print("ROA and ROE data not found in chart elements")
             return None, None
-        
         except Exception as e:
-            logging.error(f"Error in scrape_roa_roe: {e}")
+            print(f"Error in scrape_roa_roe: {e}")
             return None, None
 
     def stop(self):
