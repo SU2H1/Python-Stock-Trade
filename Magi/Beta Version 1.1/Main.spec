@@ -1,0 +1,79 @@
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all, copy_metadata
+import os
+
+block_cipher = None
+
+datas = []
+binaries = []
+hiddenimports = []
+
+# Add necessary metadata
+datas += copy_metadata('transformers')
+datas += copy_metadata('tokenizers')
+datas += copy_metadata('filelock')
+datas += copy_metadata('requests')
+datas += copy_metadata('packaging')
+datas += copy_metadata('regex')
+datas += copy_metadata('tqdm')
+datas += copy_metadata('numpy')
+datas += copy_metadata('torch')
+datas += copy_metadata('pandas')
+datas += copy_metadata('yfinance')
+datas += copy_metadata('PyQt6')
+datas += copy_metadata('matplotlib')
+datas += copy_metadata('scikit-learn')
+datas += copy_metadata('joblib')
+
+# Collect all necessary files for transformers
+datas_t, binaries_t, hiddenimports_t = collect_all('transformers')
+datas += datas_t
+binaries += binaries_t
+hiddenimports += hiddenimports_t
+
+# Add ipadic data files
+import ipadic
+ipadic_dir = os.path.dirname(ipadic.__file__)
+datas += [(ipadic_dir, 'ipadic')]
+
+a = Analysis(
+    ['Main.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=['transformers', 'tqdm', 'regex', 'requests', 'packaging', 'filelock', 'numpy', 'tokenizers', 
+                'torch', 'ipadic', 'pandas', 'yfinance', 'PyQt6', 'matplotlib', 'scikit-learn', 'joblib', 
+                'bs4', 'langdetect', 'ta'] + hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='Magi',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='C:/Users/ka1t0/Documents/Magi/Magi.ico',  # Make sure there's a closing quote here
+)
