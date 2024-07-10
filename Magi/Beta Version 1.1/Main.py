@@ -28,6 +28,8 @@ import atexit
 import tempfile
 
 
+
+
 def cleanup():
     temp_dir = tempfile.gettempdir()
     for filename in os.listdir(temp_dir):
@@ -44,6 +46,7 @@ atexit.register(cleanup)
 class StockUpdateThread(QThread):
     update_signal = pyqtSignal(dict)
 
+
     def __init__(self, stock_number, ja_tokenizer, ja_model, en_tokenizer, en_model):
         super().__init__()
         self.stock_number = stock_number
@@ -52,15 +55,8 @@ class StockUpdateThread(QThread):
         self.en_tokenizer = en_tokenizer
         self.en_model = en_model
         self.running = True
-        self.ml_model = self.load_or_train_ml_model()
+        self.ml_model = None
 
-    def load_or_train_ml_model(self):
-        model_path = f'rf_model_{self.stock_number}.joblib'
-        if os.path.exists(model_path):
-            return joblib.load(model_path)
-        else:
-            model, _ = self.train_ml_model()  # Ignore the scaler returned by train_ml_model
-            return model
 
     def get_jpx_nikkei_data(self):
         # JPX-Nikkei Index 400 ticker
@@ -124,10 +120,6 @@ class StockUpdateThread(QThread):
         model = RandomForestRegressor(n_estimators=100, random_state=42)
         model.fit(X_train_scaled, y_train)
         
-        # Save model and scaler
-        joblib.dump(model, f'rf_model_{self.stock_number}.joblib')
-        joblib.dump(scaler, f'scaler_{self.stock_number}.joblib')
-        
         return model, scaler
 
 
@@ -146,17 +138,8 @@ class StockUpdateThread(QThread):
         ])
         input_data = input_data.reshape(1, -1)
 
-        # Load the scaler
-        scaler_path = f'scaler_{self.stock_number}.joblib'
-        if os.path.exists(scaler_path):
-            scaler = joblib.load(scaler_path)
-            input_data_scaled = scaler.transform(input_data)
-        else:
-            print(f"Scaler not found for stock {self.stock_number}. Using unscaled data.")
-            input_data_scaled = input_data
-
         # Make prediction
-        prediction = self.ml_model.predict(input_data_scaled)
+        prediction = self.ml_model.predict(input_data)
         return prediction[0]
 
 
@@ -164,13 +147,16 @@ class StockUpdateThread(QThread):
         while self.running:
             data = self.fetch_latest_data()
             
+            # Train the model for each run
+            self.ml_model, _ = self.train_ml_model()
+            
             # Add ML prediction
             current_price = data['current_price']
             stock_data = data['stock_data']
             if stock_data:
                 dates, prices = zip(*stock_data)
                 latest_data = {
-                    'Open': prices[0],  # Assuming the first price is the opening price
+                    'Open': prices[0],
                     'High': max(prices),
                     'Low': min(prices),
                     'Close': current_price,
@@ -185,6 +171,7 @@ class StockUpdateThread(QThread):
             
             self.update_signal.emit(data)
             time.sleep(1)  # Update every second
+
 
     def fetch_latest_data(self):
         current_price = self.get_current_stock_price()
