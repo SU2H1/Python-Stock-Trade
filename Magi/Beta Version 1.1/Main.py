@@ -19,14 +19,16 @@ from io import BytesIO
 import re
 import time
 from ta import momentum, trend, volatility
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-import joblib
+from sklearn.neural_network import MLPRegressor
 import atexit
 import tempfile
-
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from ta.volume import VolumeWeightedAveragePrice
 
 
 
@@ -38,9 +40,7 @@ def cleanup():
                 os.remove(os.path.join(temp_dir, filename))
             except:
                 pass
-
 atexit.register(cleanup)
-
 
 
 class StockUpdateThread(QThread):
@@ -61,9 +61,9 @@ class StockUpdateThread(QThread):
     def get_jpx_nikkei_data(self):
         # JPX-Nikkei Index 400 ticker
         jpx_nikkei_ticker = "^NKJ400"
-        
+    
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*5)  # 5 years of data
+        start_date = end_date - timedelta(days=365*10)  # 10 years of data
         
         try:
             df = yf.download(jpx_nikkei_ticker, start=start_date, end=end_date)
@@ -81,17 +81,31 @@ class StockUpdateThread(QThread):
     def train_ml_model(self):
         # Fetch historical data for the stock
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*5)  # 5 years of data
+        start_date = end_date - timedelta(days=365*10)  # 10 years of data
         df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+
+        # Fetch Nikkei 225 data
+        nikkei_df = yf.download("^N225", start=start_date, end=end_date)
+        df['Nikkei_Return'] = nikkei_df['Close'].pct_change()
+
         # Feature engineering
         df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
         df['MACD'] = trend.MACD(df['Close']).macd()
         df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
         df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
         df['Return'] = df['Close'].pct_change()
+        df['Volume_Change'] = df['Volume'].pct_change()
+        df['MA_5'] = df['Close'].rolling(window=5).mean()
+        df['MA_20'] = df['Close'].rolling(window=20).mean()
+        
+        # Improved data preprocessing
+        df['Volume'] = np.log1p(df['Volume'])  # Log-transform volume
+        df['Volume_Change'] = df['Volume_Change'].clip(-1, 5)  # Cap between -100% and 500%
+        df = df[df['Volume'] > 0]  # Remove days with zero volume
         
         # Prepare features and target
-        features = ['Open', 'High', 'Low', 'Close', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'Return']
+        features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 'MA_5', 'MA_20', 'Nikkei_Return']
         
         # Shift the target variable (next day's closing price)
         df['Target'] = df['Close'].shift(-1)
@@ -102,6 +116,16 @@ class StockUpdateThread(QThread):
         X = df[features]
         y = df['Target']
         
+        # Handle infinite values
+        X = X.replace([np.inf, -np.inf], np.nan)
+        
+        # Print min and max values for debugging
+        for column in X.columns:
+            print(f"{column} - Min: {X[column].min()}, Max: {X[column].max()}")
+        
+        # Fill NaN values with the median of the respective column
+        X = X.fillna(X.median())
+        
         # Ensure X and y have the same number of samples
         if len(X) != len(y):
             min_len = min(len(X), len(y))
@@ -111,62 +135,122 @@ class StockUpdateThread(QThread):
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
-        # Scale features
+        # Scale the data
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
-        
-        # Train model
-        model = RandomForestRegressor(n_estimators=100, random_state=42)
-        model.fit(X_train_scaled, y_train)
-        
-        return model, scaler
+
+        # Train XGBoost model
+        xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.08, gamma=0, subsample=0.75,
+                                    colsample_bytree=1, max_depth=7)
+        xgb_model.fit(X_train_scaled, y_train)
+
+        # Train Random Forest model
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf_model.fit(X_train_scaled, y_train)
+
+        # Train Neural Network model
+        nn_model = MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=1000, random_state=42)
+        nn_model.fit(X_train_scaled, y_train)
+
+        # Evaluate models
+        models = [xgb_model, rf_model, nn_model]
+        model_names = ['XGBoost', 'Random Forest', 'Neural Network']
+
+        for name, model in zip(model_names, models):
+            train_predictions = model.predict(X_train_scaled)
+            test_predictions = model.predict(X_test_scaled)
+            train_mse = mean_squared_error(y_train, train_predictions)
+            test_mse = mean_squared_error(y_test, test_predictions)
+            print(f"{name} - Train MSE: {train_mse}, Test MSE: {test_mse}")
+
+        return models, scaler
 
 
-    def predict_next_day_price(self, current_data):
-        # Prepare the input data
+    def prepare_prediction_data(self, dates, prices, current_price):
+        df = pd.DataFrame({'Date': dates, 'Close': prices})
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df['Open'] = df['Close'].shift(1)
+        df['High'] = df['Close'].rolling(window=2).max()
+        df['Low'] = df['Close'].rolling(window=2).min()
+        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
+        
+        # Calculate features
+        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = trend.MACD(df['Close']).macd()
+        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
+        df['Return'] = df['Close'].pct_change()
+        df['Volume_Change'] = df['Volume'].pct_change()
+        df['MA_5'] = df['Close'].rolling(window=5).mean()
+        df['MA_20'] = df['Close'].rolling(window=20).mean()
+        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
+
+        # Use the most recent data point
+        latest_data = df.iloc[-1]
+        latest_data['Close'] = current_price  # Use the current price
+
+        return latest_data
+
+
+    def predict_next_day_price(self, current_data, models, scaler):
         input_data = np.array([
-            current_data['Open'], 
-            current_data['High'], 
-            current_data['Low'], 
+            current_data['Open'],
+            current_data['High'],
+            current_data['Low'],
             current_data['Close'],
-            current_data['RSI'], 
-            current_data['MACD'], 
-            current_data['BB_High'], 
-            current_data['BB_Low'], 
-            current_data['Return']
+            current_data['Volume'],
+            current_data['RSI'],
+            current_data['MACD'],
+            current_data['BB_High'],
+            current_data['BB_Low'],
+            current_data['VWAP'],
+            current_data['Return'],
+            current_data['Volume_Change'],
+            current_data['MA_5'],
+            current_data['MA_20'],
+            current_data['Nikkei_Return']
         ])
+        
+        # Handle potential infinite values
+        input_data = np.where(np.isinf(input_data), np.nan, input_data)
+        input_data = np.nan_to_num(input_data, nan=np.nanmean(input_data))  # Replace NaN with mean
+        
         input_data = input_data.reshape(1, -1)
+        
+        # Scale the input data
+        input_data_scaled = scaler.transform(input_data)
 
-        # Make prediction
-        prediction = self.ml_model.predict(input_data)
-        return prediction[0]
+        # Make predictions with all models
+        predictions = [model.predict(input_data_scaled)[0] for model in models]
+        
+        # Average the predictions
+        ensemble_prediction = np.mean(predictions)
+        
+        # Sanity check: limit the prediction to a reasonable range (e.g., ±5% of current price)
+        current_price = current_data['Close']
+        max_change = 0.05  # 5% maximum change
+        final_prediction = np.clip(ensemble_prediction, current_price * (1 - max_change), current_price * (1 + max_change))
+        
+        return final_prediction
 
 
     def run(self):
         while self.running:
             data = self.fetch_latest_data()
             
-            # Train the model for each run
-            self.ml_model, _ = self.train_ml_model()
+            # Train the models for each run
+            self.models, self.scaler = self.train_ml_model()
             
             # Add ML prediction
             current_price = data['current_price']
             stock_data = data['stock_data']
             if stock_data:
                 dates, prices = zip(*stock_data)
-                latest_data = {
-                    'Open': prices[0],
-                    'High': max(prices),
-                    'Low': min(prices),
-                    'Close': current_price,
-                    'RSI': momentum.RSIIndicator(pd.Series(prices)).rsi().iloc[-1],
-                    'MACD': trend.MACD(pd.Series(prices)).macd().iloc[-1],
-                    'BB_High': volatility.BollingerBands(pd.Series(prices)).bollinger_hband().iloc[-1],
-                    'BB_Low': volatility.BollingerBands(pd.Series(prices)).bollinger_lband().iloc[-1],
-                    'Return': (current_price - prices[1]) / prices[1] if len(prices) > 1 else 0
-                }
-                next_day_prediction = self.predict_next_day_price(latest_data)
+                latest_data = self.prepare_prediction_data(dates, prices, current_price)
+                next_day_prediction = self.predict_next_day_price(latest_data, self.models, self.scaler)
                 data['next_day_prediction'] = next_day_prediction
             
             self.update_signal.emit(data)
@@ -198,6 +282,7 @@ class StockUpdateThread(QThread):
             'roe': roe
         }
 
+
     def get_current_stock_price(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         response = requests.get(url)
@@ -211,6 +296,7 @@ class StockUpdateThread(QThread):
                 return None
         return None
 
+
     def scrape_nikkei_news(self):
         url = f"https://www.nikkei.com/nkd/company/news/?scode={self.stock_number}&ba=1"
         response = requests.get(url)
@@ -222,6 +308,7 @@ class StockUpdateThread(QThread):
             url = "https://www.nikkei.com" + item['href']
             news_data.append({"title": title, "url": url})
         return news_data
+
 
     def scrape_yahoo_finance_news(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T/news"
@@ -236,6 +323,7 @@ class StockUpdateThread(QThread):
                 article_url = "https://finance.yahoo.co.jp" + article_url
             news_data.append({"title": title, "url": article_url})
         return news_data
+
 
     def analyze_sentiment(self, news_data):
         sentiments = []
@@ -259,6 +347,7 @@ class StockUpdateThread(QThread):
 
         return sum(sentiments) / len(sentiments) if sentiments else None
 
+
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
         response = requests.get(url)
@@ -270,6 +359,7 @@ class StockUpdateThread(QThread):
             return company_name
         else:
             return "Company name not found"
+
 
     def get_stock_data(self):
         ticker = f"{self.stock_number}.T"
@@ -646,16 +736,19 @@ class MAGIStockAnalysis(QWidget):
             recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, roa, roe, purchase_price)
 
             # Update CASPER
-            next_day_prediction_text = f"¥{next_day_prediction:.2f}" if next_day_prediction is not None else "N/A"
-            prediction_change = ((next_day_prediction - current_price) / current_price * 100) if next_day_prediction is not None and current_price is not None else None
-            prediction_change_text = f"{prediction_change:.2f}%" if prediction_change is not None else "N/A"
+            next_day_prediction = data.get('next_day_prediction')
+            if next_day_prediction is not None and current_price is not None:
+                prediction_change = ((next_day_prediction - current_price) / current_price) * 100
+                next_day_prediction_text = f"¥{next_day_prediction:.2f} ({prediction_change:+.2f}%)"
+            else:
+                next_day_prediction_text = "N/A"
 
             casper_content = f"""
                 <p>Company: {company_name}</p>
                 <p><a href='nikkei'>Nikkei Sentiment: {self.sentiment_to_text(self.nikkei_sentiment)}</a></p>
                 <p><a href='yahoo'>Yahoo Sentiment: {self.sentiment_to_text(self.yahoo_sentiment)}</a></p>
                 <p>Overall Sentiment: {overall_sentiment_text}</p>
-                <p>Next Day Prediction: {next_day_prediction_text} ({prediction_change_text})</p>
+                <p>Next Day Prediction: {next_day_prediction_text}</p>
             """
             casper_browser = self.casper.findChild(QTextBrowser)
             if self.has_content_changed('casper', casper_content):
