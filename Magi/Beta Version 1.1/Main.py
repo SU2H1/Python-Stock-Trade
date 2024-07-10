@@ -55,7 +55,9 @@ class StockUpdateThread(QThread):
         self.en_tokenizer = en_tokenizer
         self.en_model = en_model
         self.running = True
-        self.ml_model = None
+        self.ensemble = None
+        self.scaler = None
+        self.model_tracker = ModelTracker()
 
 
     def get_jpx_nikkei_data(self):
@@ -143,28 +145,15 @@ class StockUpdateThread(QThread):
         # Train XGBoost model
         xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.08, gamma=0, subsample=0.75,
                                     colsample_bytree=1, max_depth=7)
-        xgb_model.fit(X_train_scaled, y_train)
-
-        # Train Random Forest model
         rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-        rf_model.fit(X_train_scaled, y_train)
-
-        # Train Neural Network model
         nn_model = MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=1000, random_state=42)
-        nn_model.fit(X_train_scaled, y_train)
 
-        # Evaluate models
         models = [xgb_model, rf_model, nn_model]
-        model_names = ['XGBoost', 'Random Forest', 'Neural Network']
+        for model in models:
+            model.fit(X_train_scaled, y_train)
 
-        for name, model in zip(model_names, models):
-            train_predictions = model.predict(X_train_scaled)
-            test_predictions = model.predict(X_test_scaled)
-            train_mse = mean_squared_error(y_train, train_predictions)
-            test_mse = mean_squared_error(y_test, test_predictions)
-            print(f"{name} - Train MSE: {train_mse}, Test MSE: {test_mse}")
-
-        return models, scaler
+        self.ensemble = ExplicitRewardEnsemble(models)
+        return self.ensemble, scaler
 
 
     def prepare_prediction_data(self, dates, prices, current_price):
@@ -195,7 +184,7 @@ class StockUpdateThread(QThread):
         return latest_data
 
 
-    def predict_next_day_price(self, current_data, models, scaler):
+    def predict_next_day_price(self, current_data):
         input_data = np.array([
             current_data['Open'],
             current_data['High'],
@@ -221,39 +210,55 @@ class StockUpdateThread(QThread):
         input_data = input_data.reshape(1, -1)
         
         # Scale the input data
-        input_data_scaled = scaler.transform(input_data)
+        input_data_scaled = self.scaler.transform(input_data)
 
-        # Make predictions with all models
-        predictions = [model.predict(input_data_scaled)[0] for model in models]
-        
-        # Average the predictions
-        ensemble_prediction = np.mean(predictions)
+        # Make prediction using the ensemble
+        prediction = self.ensemble.predict(input_data_scaled)[0]
         
         # Sanity check: limit the prediction to a reasonable range (e.g., ±5% of current price)
         current_price = current_data['Close']
         max_change = 0.05  # 5% maximum change
-        final_prediction = np.clip(ensemble_prediction, current_price * (1 - max_change), current_price * (1 + max_change))
+        final_prediction = np.clip(prediction, current_price * (1 - max_change), current_price * (1 + max_change))
         
         return final_prediction
 
 
     def run(self):
+        days_since_last_retrain = 0
         while self.running:
             data = self.fetch_latest_data()
             
-            # Train the models for each run
-            self.models, self.scaler = self.train_ml_model()
+            if self.ensemble is None or self.scaler is None:
+                self.ensemble, self.scaler = self.train_ml_model()
             
-            # Add ML prediction
             current_price = data['current_price']
             stock_data = data['stock_data']
             if stock_data:
                 dates, prices = zip(*stock_data)
                 latest_data = self.prepare_prediction_data(dates, prices, current_price)
-                next_day_prediction = self.predict_next_day_price(latest_data, self.models, self.scaler)
+                next_day_prediction = self.predict_next_day_price(latest_data)
                 data['next_day_prediction'] = next_day_prediction
+                
+                # Add prediction to tracker
+                self.model_tracker.add_prediction(next_day_prediction, current_price)
+                
+                # Update model weights every 30 days
+                if len(self.model_tracker.predictions) >= 30:
+                    accuracies = [1 - abs(p - a) / a for p, a in zip(self.model_tracker.predictions[-30:], self.model_tracker.actuals[-30:])]
+                    self.ensemble.update_weights(accuracies)
+                    data['model_weights'] = self.ensemble.get_model_weights()
+                
+                # Calculate overall accuracy
+                accuracy = self.model_tracker.calculate_accuracy()
+                data['model_accuracy'] = accuracy
             
             self.update_signal.emit(data)
+            
+            days_since_last_retrain += 1
+            if days_since_last_retrain >= 30:  # Retrain every 30 days
+                self.ensemble, self.scaler = self.train_ml_model()
+                days_since_last_retrain = 0
+            
             time.sleep(1)  # Update every second
 
 
@@ -447,8 +452,10 @@ class StockUpdateThread(QThread):
             print(f"Error in scrape_roa_roe: {e}")
             return None, None
 
+
     def stop(self):
         self.running = False
+
 
 
 class SentimentPopup(QDialog):
@@ -484,6 +491,41 @@ class SentimentPopup(QDialog):
         layout.addWidget(close_button)
 
         self.setLayout(layout)
+
+
+
+class ExplicitRewardEnsemble:
+    def __init__(self, models):
+        self.models = models
+        self.weights = [1/len(models)] * len(models)
+        self.model_names = ['XGBoost', 'Random Forest', 'Neural Network']
+
+
+    def predict(self, X):
+        predictions = [model.predict(X) for model in self.models]
+        return sum(w * p for w, p in zip(self.weights, predictions))
+
+
+    def update_weights(self, accuracies):
+        for i, (acc, name) in enumerate(zip(accuracies, self.model_names)):
+            if acc > 0.9:  # Reward threshold
+                self.weights[i] *= 1.5
+                print(f"{name} model performed exceptionally well! Increasing its weight.")
+            elif acc < 0.5:  # Punishment threshold
+                self.weights[i] *= 0.5
+                print(f"{name} model performed poorly. Decreasing its weight.")
+            else:
+                print(f"{name} model performed adequately. Weight unchanged.")
+        
+        # Normalize weights
+        total = sum(self.weights)
+        self.weights = [w / total for w in self.weights]
+        
+        print("Updated model weights:", [f"{name}: {w:.2f}" for name, w in zip(self.model_names, self.weights)])
+
+
+    def get_model_weights(self):
+        return {name: weight for name, weight in zip(self.model_names, self.weights)}
 
 
 
@@ -744,7 +786,8 @@ class MAGIStockAnalysis(QWidget):
                 next_day_prediction_text = "N/A"
 
             casper_content = f"""
-                <p>Company: {company_name}</p>
+                <p>Company: {company_name
+                }</p>
                 <p><a href='nikkei'>Nikkei Sentiment: {self.sentiment_to_text(self.nikkei_sentiment)}</a></p>
                 <p><a href='yahoo'>Yahoo Sentiment: {self.sentiment_to_text(self.yahoo_sentiment)}</a></p>
                 <p>Overall Sentiment: {overall_sentiment_text}</p>
@@ -763,9 +806,13 @@ class MAGIStockAnalysis(QWidget):
             action = recommendation_parts[0]
             explanation = recommendation_parts[1] if len(recommendation_parts) > 1 else ""
             
+            model_accuracy = data.get('model_accuracy', 'N/A')
+            model_accuracy_text = f"{model_accuracy:.2%}" if isinstance(model_accuracy, float) else model_accuracy
+            
             key_metrics = f"""
             <p>PSR: {psr:.2f} | PBR: {pbr:.2f}</p>
             <p>ROA: {roa:.2f}% | ROE: {roe:.2f}%</p>
+            <p>Model Accuracy: {model_accuracy_text}</p>
             """
 
             balthasar_content = f"""
@@ -1056,6 +1103,24 @@ class MAGIStockAnalysis(QWidget):
             self.update_thread.stop()
             self.update_thread.wait()
         event.accept()
+
+
+
+class ModelTracker:
+    def __init__(self):
+        self.predictions = []
+        self.actuals = []
+
+    def add_prediction(self, prediction, actual):
+        self.predictions.append(prediction)
+        self.actuals.append(actual)
+
+    def calculate_accuracy(self):
+        if len(self.predictions) == 0:
+            return 0
+        
+        errors = [abs(p - a) / a for p, a in zip(self.predictions, self.actuals)]
+        return 1 - sum(errors) / len(errors)
 
 
 
