@@ -2,6 +2,10 @@
 from PyInstaller.utils.hooks import collect_all, copy_metadata
 import os
 import sys
+from importlib.metadata import PackageNotFoundError
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['DYLD_LIBRARY_PATH'] = '/opt/homebrew/opt/libomp/lib'
 
 block_cipher = None
 
@@ -9,39 +13,91 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# Add necessary metadata
-datas += copy_metadata('transformers')
-datas += copy_metadata('tokenizers')
-datas += copy_metadata('filelock')
-datas += copy_metadata('requests')
-datas += copy_metadata('packaging')
-datas += copy_metadata('regex')
-datas += copy_metadata('tqdm')
-datas += copy_metadata('numpy')
-datas += copy_metadata('torch')
-datas += copy_metadata('pandas')
-datas += copy_metadata('yfinance')
-datas += copy_metadata('bs4')
-datas += copy_metadata('matplotlib')
+# Packages for metadata collection
+metadata_packages = ['transformers', 'tokenizers', 'filelock', 'requests', 'packaging', 
+                     'regex', 'tqdm', 'numpy', 'torch', 'pandas', 'matplotlib', 'scikit-learn',
+                     'xgboost', 'ta', 'scipy']
 
-# Collect all necessary files for transformers
-datas_t, binaries_t, hiddenimports_t = collect_all('transformers')
-datas += datas_t
-binaries += binaries_t
-hiddenimports += hiddenimports_t
+# Add necessary metadata
+for package in metadata_packages:
+    try:
+        datas += copy_metadata(package)
+    except PackageNotFoundError:
+        print(f"Warning: Package '{package}' not found. Skipping metadata collection for this package.")
+
+# Collect all necessary files for critical packages
+for package in ['transformers', 'scipy', 'xgboost']:
+    try:
+        pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(package)
+        datas += pkg_datas
+        binaries += pkg_binaries
+        hiddenimports += pkg_hiddenimports
+    except Exception as e:
+        print(f"Warning: Error collecting '{package}' data: {e}")
 
 # Add ipadic data files
-import ipadic
-ipadic_dir = os.path.dirname(ipadic.__file__)
-datas += [(ipadic_dir, 'ipadic')]
+try:
+    import ipadic
+    ipadic_dir = os.path.dirname(ipadic.__file__)
+    datas += [(ipadic_dir, 'ipadic')]
+except ImportError:
+    print("Warning: ipadic not found. Skipping ipadic data files.")
+
+# Add model files
+model_paths = [
+    'cl-tohoku/bert-base-japanese',
+    'jarvisx17/japanese-sentiment-analysis',
+    'distilbert-base-uncased-finetuned-sst-2-english'
+]
+for path in model_paths:
+    if os.path.exists(path):
+        datas += [(path, path)]
+    else:
+        print(f"Warning: Model path '{path}' not found. Skipping this model.")
+
+# Explicitly add XGBoost library
+import xgboost
+xgboost_lib = os.path.dirname(xgboost.__file__)
+binaries += [(os.path.join(xgboost_lib, 'lib', 'libxgboost.dylib'), 'xgboost/lib')]
+
+# Add OpenMP library
+binaries += [('/opt/homebrew/opt/libomp/lib/libomp.dylib', '.')]
+
+additional_hiddenimports = [
+    'sklearn.utils._cython_blas',
+    'sklearn.neighbors.typedefs',
+    'sklearn.neighbors.quad_tree',
+    'sklearn.tree._utils',
+    'pandas._libs.tslibs.timedeltas',
+    'pandas._libs.tslibs.offsets',
+    'pandas._libs.tslibs.np_datetime',
+    'pandas._libs.tslibs.nattype',
+    'pandas._libs.groupby',
+    'pandas._libs.ops',
+    'ta.volatility',
+    'ta.trend',
+    'ta.momentum',
+    'ta.volume',
+    'scipy._lib.array_api_compat.numpy.fft',
+    'scipy._lib.array_api_compat',
+    'scipy.fft',
+    'scipy.sparse',
+    'scipy.sparse._base',
+    'scipy.sparse._sputils',
+    'scipy._lib._util',
+    'scipy._lib._array_api',
+    'xgboost.core'
+]
 
 a = Analysis(
     ['Main.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['transformers', 'tqdm', 'regex', 'requests', 'packaging', 'filelock', 'numpy', 'tokenizers', 'torch', 'ipadic', 'PyQt6', 'bs4', 'langdetect', 'yfinance', 'pandas', 'matplotlib', 'ta'] + hiddenimports,
-    hookspath=[],
+    hiddenimports=['transformers', 'tqdm', 'regex', 'requests', 'packaging', 'filelock', 
+                   'numpy', 'tokenizers', 'torch', 'ipadic', 'PyQt6', 'bs4', 'langdetect', 
+                   'yfinance', 'pandas', 'matplotlib', 'sklearn', 'xgboost', 'ta', 'scipy'] + additional_hiddenimports + hiddenimports,
+    hookspath=['.'],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -50,6 +106,7 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -57,7 +114,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Magi',
+    name='MAGI Stock Analysis',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -77,8 +134,8 @@ if sys.platform == 'darwin':
         a.binaries,
         a.zipfiles,
         a.datas,
-        name='Magi.app',
-        icon='/Users/kaitosumishi/Magi/NERV.png',  # Change this to your icon path
+        name='MAGI Stock Analysis.app',
+        icon='/Users/kaitosumishi/Magi/NERV.png',  # Make sure this path is correct
         bundle_identifier='com.yourcompany.MAGIStockAnalysis',
         info_plist={
             'NSHighResolutionCapable': 'True',
@@ -88,7 +145,6 @@ if sys.platform == 'darwin':
             'NSPrincipalClass': 'NSApplication',
             'NSAppleScriptEnabled': False
         },
-        console=False
     )
 else:
     coll = COLLECT(
@@ -99,5 +155,5 @@ else:
         strip=False,
         upx=True,
         upx_exclude=[],
-        name='Magi'
+        name='MAGI Stock Analysis'
     )
