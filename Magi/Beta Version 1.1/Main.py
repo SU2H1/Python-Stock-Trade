@@ -560,7 +560,7 @@ class MAGIStockAnalysis(QWidget):
         # Timer for graph updates
         self.graph_update_timer = QTimer(self)
         self.graph_update_timer.timeout.connect(self.update_graph)
-        self.graph_update_timer.start(0)  # Update as fast as possible
+        self.graph_update_timer.start(1000)  # Update every second
 
         # Determine the running environment
         if getattr(sys, 'frozen', False):
