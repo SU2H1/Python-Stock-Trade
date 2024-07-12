@@ -546,28 +546,39 @@ class MAGIStockAnalysis(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
+        
+        # Data storage
+        self.current_stock_data = None
         self.nikkei_news_data = []
         self.yahoo_news_data = []
-        
-        if getattr(sys, 'frozen', False):
-            # we are running in a bundle
-            bundle_dir = sys._MEIPASS
-        else:
-            # we are running in a normal Python environment
-            bundle_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        self.ja_tokenizer = BertJapaneseTokenizer.from_pretrained("cl-tohoku/bert-base-japanese")
-        self.ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
-        self.en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-        self.en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-        self.flicker_timers = {}
-        self.update_thread = None
         self.previous_results = {
             'casper': '',
             'balthasar': '',
             'melchior': ''
         }
 
+        # Timer for graph updates
+        self.graph_update_timer = QTimer(self)
+        self.graph_update_timer.timeout.connect(self.update_graph)
+        self.graph_update_timer.start(0)  # Update as fast as possible
+
+        # Determine the running environment
+        if getattr(sys, 'frozen', False):
+            bundle_dir = sys._MEIPASS
+        else:
+            bundle_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Initialize tokenizers and models
+        self.ja_tokenizer = BertJapaneseTokenizer.from_pretrained("cl-tohoku/bert-base-japanese")
+        self.ja_model = AutoModelForSequenceClassification.from_pretrained("jarvisx17/japanese-sentiment-analysis")
+        self.en_tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+        self.en_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+
+        # Other initializations
+        self.flicker_timers = {}
+        self.update_thread = None
+
+        # Set window properties
         self.showFullScreen()
         self.setWindowState(Qt.WindowState.WindowFullScreen)
 
@@ -611,6 +622,37 @@ class MAGIStockAnalysis(QWidget):
             self.previous_results[component_name] = new_content
             return True
         return False
+
+
+    def update_graph(self):
+        if self.current_stock_data:
+            component = self.balthasar  # Assuming we're updating BALTHASAR's graph
+            dates = [date for date, _ in self.current_stock_data]
+            prices = [price for _, price in self.current_stock_data]
+
+            fig, ax = plt.subplots(figsize=(8, 4), facecolor='#001a1a')
+            ax.plot(dates, prices, color='#00ff00')
+            ax.set_facecolor('#001a1a')
+            ax.tick_params(axis='x', colors='#00ff00')
+            ax.tick_params(axis='y', colors='#00ff00')
+            ax.spines['bottom'].set_color('#00ff00')
+            ax.spines['top'].set_color('#00ff00')
+            ax.spines['left'].set_color('#00ff00')
+            ax.spines['right'].set_color('#00ff00')
+            plt.title('Live Stock Pattern', color='#00ff00')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            buf = BytesIO()
+            plt.savefig(buf, format='png')
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            
+            graph_label = component.findChild(QLabel)
+            graph_label.setPixmap(pixmap)
+            
+            plt.close(fig)
 
 
     def initUI(self):
@@ -771,27 +813,25 @@ class MAGIStockAnalysis(QWidget):
 
     def update_display(self, data, purchase_price):
         try:
+            self.current_stock_data = data['stock_data']
             current_price = data['current_price']
             company_name = data['company_name']
             self.nikkei_sentiment = data['nikkei_sentiment']
             self.yahoo_sentiment = data['yahoo_sentiment']
             self.nikkei_news_data = data['nikkei_news']
             self.yahoo_news_data = data['yahoo_news']
-            stock_data = data['stock_data']
             psr, pbr = data['psr'], data['pbr']
-            roa = data['roa']
-            roe = data['roe']
-            next_day_prediction = data.get('next_day_prediction')  # Get the prediction
+            roa, roe = data['roa'], data['roe']
+            next_day_prediction = data.get('next_day_prediction')
 
             overall_sentiment = (self.nikkei_sentiment + self.yahoo_sentiment) / 2 if self.nikkei_sentiment is not None and self.yahoo_sentiment is not None else None
             overall_sentiment_text = self.sentiment_to_text(overall_sentiment) if overall_sentiment is not None else "Insufficient data"
 
-            matched_pattern = self.identify_pattern(stock_data) if stock_data else "Unable to retrieve stock data"
+            matched_pattern = self.identify_pattern(self.current_stock_data) if self.current_stock_data else "Unable to retrieve stock data"
             psr_score, pbr_score, psr_comment, pbr_comment = self.evaluate_psr_pbr(psr, pbr)
-            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, stock_data, psr, pbr, roa, roe, purchase_price)
+            recommendation = self.get_action_recommendation(overall_sentiment_text, matched_pattern, self.current_stock_data, psr, pbr, roa, roe, purchase_price)
 
             # Update CASPER
-            next_day_prediction = data.get('next_day_prediction')
             if next_day_prediction is not None and current_price is not None:
                 prediction_change = ((next_day_prediction - current_price) / current_price) * 100
                 next_day_prediction_text = f"¥{next_day_prediction:.2f} ({prediction_change:+.2f}%)"
@@ -799,8 +839,7 @@ class MAGIStockAnalysis(QWidget):
                 next_day_prediction_text = "N/A"
 
             casper_content = f"""
-                <p>Company: {company_name
-                }</p>
+                <p>Company: {company_name}</p>
                 <p><a href='nikkei'>Nikkei Sentiment: {self.sentiment_to_text(self.nikkei_sentiment)}</a></p>
                 <p><a href='yahoo'>Yahoo Sentiment: {self.sentiment_to_text(self.yahoo_sentiment)}</a></p>
                 <p>Overall Sentiment: {overall_sentiment_text}</p>
@@ -837,7 +876,6 @@ class MAGIStockAnalysis(QWidget):
             
             if self.has_content_changed('balthasar', balthasar_content):
                 self.update_component_with_flicker(self.balthasar, balthasar_content)
-                self.update_graph(self.balthasar, stock_data)
             else:
                 balthasar_browser.setHtml(balthasar_content)
             
@@ -871,6 +909,9 @@ class MAGIStockAnalysis(QWidget):
             else:
                 melchior_browser.setHtml(melchior_content)
 
+            # Trigger the graph update
+            self.graph_update_timer.start()  # Start or restart the timer
+
         except Exception as e:
             print(f"Error in update_display: {e}")
             self.show_error(f"An error occurred while updating the display: {e}")
@@ -898,36 +939,6 @@ class MAGIStockAnalysis(QWidget):
 
         popup = SentimentPopup(source.capitalize(), sentiment, news_data)
         popup.exec()
-
-
-    def update_graph(self, component, stock_data):
-        if stock_data:
-            dates = [date for date, _ in stock_data]
-            prices = [price for _, price in stock_data]
-
-            fig, ax = plt.subplots(figsize=(8, 4), facecolor='#001a1a')
-            ax.plot(dates, prices, color='#00ff00')
-            ax.set_facecolor('#001a1a')
-            ax.tick_params(axis='x', colors='#00ff00')
-            ax.tick_params(axis='y', colors='#00ff00')
-            ax.spines['bottom'].set_color('#00ff00')
-            ax.spines['top'].set_color('#00ff00')
-            ax.spines['left'].set_color('#00ff00')
-            ax.spines['right'].set_color('#00ff00')
-            plt.title('30-Day Stock Pattern', color='#00ff00')
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-
-            buf = BytesIO()
-            plt.savefig(buf, format='png')
-            buf.seek(0)
-            pixmap = QPixmap()
-            pixmap.loadFromData(buf.getvalue())
-            
-            graph_label = component.findChild(QLabel)
-            graph_label.setPixmap(pixmap)
-            
-            plt.close(fig)
 
 
     def update_component_with_flicker(self, component, new_text):
@@ -1042,6 +1053,10 @@ class MAGIStockAnalysis(QWidget):
             pbr_comment = "PBR data not available."
         
         return psr_score, pbr_score, psr_comment, pbr_comment
+
+
+    def stop_graph_updates(self):
+        self.graph_update_timer.stop()
 
 
     def get_action_recommendation(self, public_opinion, stock_trend, stock_price_data, psr, pbr, roa, roe, purchase_price=None):
