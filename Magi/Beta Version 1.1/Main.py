@@ -22,7 +22,7 @@ from ta import momentum, trend, volatility
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
 from sklearn.neural_network import MLPRegressor
 import atexit
 import tempfile
@@ -58,6 +58,7 @@ class StockUpdateThread(QThread):
         self.ensemble = None
         self.scaler = None
         self.model_tracker = ModelTracker()
+        self.days_since_last_retrain = 0
 
 
     def get_jpx_nikkei_data(self):
@@ -184,30 +185,40 @@ class StockUpdateThread(QThread):
         return latest_data
 
 
+    def prepare_prediction_data(self, dates, prices, current_price):
+        df = pd.DataFrame({'Date': dates, 'Close': prices})
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df['Open'] = df['Close'].shift(1)
+        df['High'] = df['Close'].rolling(window=2).max()
+        df['Low'] = df['Close'].rolling(window=2).min()
+        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
+        
+        # Calculate features
+        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = trend.MACD(df['Close']).macd()
+        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
+        df['Return'] = df['Close'].pct_change()
+        df['Volume_Change'] = df['Volume'].pct_change()
+        df['MA_5'] = df['Close'].rolling(window=5).mean()
+        df['MA_20'] = df['Close'].rolling(window=20).mean()
+        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
+
+        # Use the most recent data point
+        latest_data = df.iloc[-1:].copy()  # Create a copy to avoid SettingWithCopyWarning
+        latest_data.loc[latest_data.index[-1], 'Close'] = current_price  # Use the current price
+
+        return latest_data
+
     def predict_next_day_price(self, current_data):
-        input_data = np.array([
-            current_data['Open'],
-            current_data['High'],
-            current_data['Low'],
-            current_data['Close'],
-            current_data['Volume'],
-            current_data['RSI'],
-            current_data['MACD'],
-            current_data['BB_High'],
-            current_data['BB_Low'],
-            current_data['VWAP'],
-            current_data['Return'],
-            current_data['Volume_Change'],
-            current_data['MA_5'],
-            current_data['MA_20'],
-            current_data['Nikkei_Return']
-        ])
+        features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 'MA_5', 'MA_20', 'Nikkei_Return']
+        input_data = current_data[features].values
         
         # Handle potential infinite values
         input_data = np.where(np.isinf(input_data), np.nan, input_data)
         input_data = np.nan_to_num(input_data, nan=np.nanmean(input_data))  # Replace NaN with mean
-        
-        input_data = input_data.reshape(1, -1)
         
         # Scale the input data
         input_data_scaled = self.scaler.transform(input_data)
@@ -216,15 +227,13 @@ class StockUpdateThread(QThread):
         prediction = self.ensemble.predict(input_data_scaled)[0]
         
         # Sanity check: limit the prediction to a reasonable range (e.g., ±5% of current price)
-        current_price = current_data['Close']
+        current_price = current_data['Close'].values[0]
         max_change = 0.05  # 5% maximum change
         final_prediction = np.clip(prediction, current_price * (1 - max_change), current_price * (1 + max_change))
         
         return final_prediction
 
-
     def run(self):
-        days_since_last_retrain = 0
         while self.running:
             data = self.fetch_latest_data()
             
@@ -239,25 +248,29 @@ class StockUpdateThread(QThread):
                 next_day_prediction = self.predict_next_day_price(latest_data)
                 data['next_day_prediction'] = next_day_prediction
                 
-                # Add prediction to tracker
-                self.model_tracker.add_prediction(next_day_prediction, current_price)
+                # Add prediction and actual to tracker
+                self.model_tracker.add_prediction(next_day_prediction)
+                self.model_tracker.add_actual(current_price)
                 
                 # Update model weights every 30 days
                 if len(self.model_tracker.predictions) >= 30:
-                    accuracies = [1 - abs(p - a) / a for p, a in zip(self.model_tracker.predictions[-30:], self.model_tracker.actuals[-30:])]
+                    accuracies = self.model_tracker.calculate_accuracies()
                     self.ensemble.update_weights(accuracies)
                     data['model_weights'] = self.ensemble.get_model_weights()
                 
                 # Calculate overall accuracy
-                accuracy = self.model_tracker.calculate_accuracy()
-                data['model_accuracy'] = accuracy
+                accuracy_metrics = self.model_tracker.calculate_accuracy()
+                if accuracy_metrics:
+                    data['model_accuracy'] = accuracy_metrics['Accuracy']
+                    data['mape'] = accuracy_metrics['MAPE']
+                    data['rmse'] = accuracy_metrics['RMSE']
             
             self.update_signal.emit(data)
             
-            days_since_last_retrain += 1
-            if days_since_last_retrain >= 30:  # Retrain every 30 days
+            self.days_since_last_retrain += 1
+            if self.days_since_last_retrain >= 30:  # Retrain every 30 days
                 self.ensemble, self.scaler = self.train_ml_model()
-                days_since_last_retrain = 0
+                self.days_since_last_retrain = 0
             
             time.sleep(1)  # Update every second
 
@@ -1107,20 +1120,36 @@ class MAGIStockAnalysis(QWidget):
 
 
 class ModelTracker:
-    def __init__(self):
+    def __init__(self, window_size=30):
         self.predictions = []
         self.actuals = []
+        self.window_size = window_size
 
-    def add_prediction(self, prediction, actual):
+    def add_prediction(self, prediction):
         self.predictions.append(prediction)
+        if len(self.predictions) > self.window_size:
+            self.predictions.pop(0)
+
+    def add_actual(self, actual):
         self.actuals.append(actual)
+        if len(self.actuals) > self.window_size:
+            self.actuals.pop(0)
+
+    def calculate_accuracies(self):
+        return [1 - abs(p - a) / a for p, a in zip(self.predictions, self.actuals)]
 
     def calculate_accuracy(self):
-        if len(self.predictions) == 0:
-            return 0
+        if len(self.predictions) != len(self.actuals) or len(self.predictions) < 2:
+            return None
         
-        errors = [abs(p - a) / a for p, a in zip(self.predictions, self.actuals)]
-        return 1 - sum(errors) / len(errors)
+        mape = mean_absolute_percentage_error(self.actuals, self.predictions)
+        rmse = np.sqrt(mean_squared_error(self.actuals, self.predictions))
+        
+        return {
+            'MAPE': mape,
+            'RMSE': rmse,
+            'Accuracy': 1 - mape  # This is a rough approximation of accuracy
+        }
 
 
 
