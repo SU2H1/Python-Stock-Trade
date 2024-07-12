@@ -5,3 +5,4 @@ pip install requests beautifulsoup4 transformers torch numpy datetime langdetect
 
 >> python -m venv pyinstaller_env
 >> pyinstaller_env\Scripts\activate
+MAGI\ Stock\ Analysis.app/Contents/MacOS/MAGI\ Stock\ Analysis
