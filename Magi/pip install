@@ -1,4 +1,4 @@
-pip install requests beautifulsoup4 transformers torch numpy datetime langdetect pandas yfinance PyQt6 matplotlib ta scikit-learn fugashi ipadic xgboost pyinstaller asyncio aiohttp
+pip install requests beautifulsoup4 transformers torch numpy datetime langdetect pandas yfinance PyQt6 matplotlib ta scikit-learn fugashi ipadic xgboost pyinstaller asyncio aiohttp lru_cache
 
 
 
