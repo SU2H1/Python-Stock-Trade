@@ -1,7 +1,7 @@
 pip install requests beautifulsoup4 transformers torch numpy datetime langdetect pandas yfinance PyQt6 matplotlib ta scikit-learn fugashi ipadic xgboost pyinstaller asyncio aiohttp lru_cache
 
 
-
+pip install requests beautifulsoup4 transformers torch numpy langdetect pandas yfinance PyQt6 matplotlib ta scikit-learn xgboost tensorflow fugashi ipadic pyinstaller asyncio aiohttp
 
 >> python -m venv pyinstaller_env
 >> pyinstaller_env\Scripts\activate
