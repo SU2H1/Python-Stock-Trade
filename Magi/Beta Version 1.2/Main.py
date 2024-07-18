@@ -29,7 +29,18 @@ import tempfile
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from ta.volume import VolumeWeightedAveragePrice
-
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.ensemble import VotingRegressor
+from sklearn.metrics import mean_squared_error
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.impute import KNNImputer
+from sklearn.feature_selection import RFE
+from sklearn.model_selection import TimeSeriesSplit
+import signal
 
 
 def cleanup():
@@ -43,9 +54,17 @@ def cleanup():
 atexit.register(cleanup)
 
 
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("LSTM training timed out")
+
+
+
 class StockUpdateThread(QThread):
     update_signal = pyqtSignal(dict)
-
 
     def __init__(self, stock_number, ja_tokenizer, ja_model, en_tokenizer, en_model):
         super().__init__()
@@ -55,31 +74,9 @@ class StockUpdateThread(QThread):
         self.en_tokenizer = en_tokenizer
         self.en_model = en_model
         self.running = True
-        self.ensemble = None
-        self.scaler = None
+        self.predictor = None
         self.model_tracker = ModelTracker()
         self.days_since_last_retrain = 0
-
-
-    def get_jpx_nikkei_data(self):
-        # JPX-Nikkei Index 400 ticker
-        jpx_nikkei_ticker = "^NKJ400"
-    
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*10)  # 10 years of data
-        
-        try:
-            df = yf.download(jpx_nikkei_ticker, start=start_date, end=end_date)
-            
-            # Calculate additional features
-            df['JPX_Returns'] = df['Close'].pct_change()
-            df['JPX_Volatility'] = df['Close'].rolling(window=30).std()
-            
-            return df
-        except Exception as e:
-            print(f"Error retrieving JPX-Nikkei Index 400 data: {e}")
-            return None
-
 
     def train_ml_model(self):
         # Fetch historical data for the stock
@@ -122,10 +119,6 @@ class StockUpdateThread(QThread):
         # Handle infinite values
         X = X.replace([np.inf, -np.inf], np.nan)
         
-        # Print min and max values for debugging
-        for column in X.columns:
-            print(f"{column} - Min: {X[column].min()}, Max: {X[column].max()}")
-        
         # Fill NaN values with the median of the respective column
         X = X.fillna(X.median())
         
@@ -135,96 +128,29 @@ class StockUpdateThread(QThread):
             X = X.iloc[:min_len]
             y = y.iloc[:min_len]
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Train the improved predictor
+        self.predictor = ImprovedStockPredictor()
+        self.predictor.train(X, y)
         
-        # Scale the data
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        # Train XGBoost model
-        xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.08, gamma=0, subsample=0.75,
-                                    colsample_bytree=1, max_depth=7)
-        rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-        nn_model = MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=1000, random_state=42)
-
-        models = [xgb_model, rf_model, nn_model]
-        for model in models:
-            model.fit(X_train_scaled, y_train)
-
-        self.ensemble = ExplicitRewardEnsemble(models)
-        return self.ensemble, scaler
-
-
-    def prepare_prediction_data(self, dates, prices, current_price):
-        df = pd.DataFrame({'Date': dates, 'Close': prices})
-        df['Date'] = pd.to_datetime(df['Date'])
-        df.set_index('Date', inplace=True)
-        df['Open'] = df['Close'].shift(1)
-        df['High'] = df['Close'].rolling(window=2).max()
-        df['Low'] = df['Close'].rolling(window=2).min()
-        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
+        # Evaluate the model on the entire dataset
+        X_processed, _ = self.predictor.preprocess_data(X)
+        y_pred = self.predictor.predict(X_processed)
+        mse = mean_squared_error(y, y_pred)
+        rmse = np.sqrt(mse)
+        print(f"Model RMSE on entire dataset: {rmse}")
         
-        # Calculate features
-        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
-        df['MACD'] = trend.MACD(df['Close']).macd()
-        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
-        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
-        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
-        df['Return'] = df['Close'].pct_change()
-        df['Volume_Change'] = df['Volume'].pct_change()
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
-
-        # Use the most recent data point
-        latest_data = df.iloc[-1]
-        latest_data['Close'] = current_price  # Use the current price
-
-        return latest_data
-
-
-    def prepare_prediction_data(self, dates, prices, current_price):
-        df = pd.DataFrame({'Date': dates, 'Close': prices})
-        df['Date'] = pd.to_datetime(df['Date'])
-        df.set_index('Date', inplace=True)
-        df['Open'] = df['Close'].shift(1)
-        df['High'] = df['Close'].rolling(window=2).max()
-        df['Low'] = df['Close'].rolling(window=2).min()
-        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
-        
-        # Calculate features
-        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
-        df['MACD'] = trend.MACD(df['Close']).macd()
-        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
-        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
-        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
-        df['Return'] = df['Close'].pct_change()
-        df['Volume_Change'] = df['Volume'].pct_change()
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
-
-        # Use the most recent data point
-        latest_data = df.iloc[-1:].copy()  # Create a copy to avoid SettingWithCopyWarning
-        latest_data.loc[latest_data.index[-1], 'Close'] = current_price  # Use the current price
-
-        return latest_data
+        return self.predictor
 
     def predict_next_day_price(self, current_data):
         features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 'MA_5', 'MA_20', 'Nikkei_Return']
-        input_data = current_data[features].values
+        input_data = current_data[features].values.reshape(1, -1)
         
         # Handle potential infinite values
         input_data = np.where(np.isinf(input_data), np.nan, input_data)
         input_data = np.nan_to_num(input_data, nan=np.nanmean(input_data))  # Replace NaN with mean
         
-        # Scale the input data
-        input_data_scaled = self.scaler.transform(input_data)
-
-        # Make prediction using the ensemble
-        prediction = self.ensemble.predict(input_data_scaled)[0]
+        # Make prediction using the improved predictor
+        prediction = self.predictor.predict(input_data)[0]
         
         # Sanity check: limit the prediction to a reasonable range (e.g., ±5% of current price)
         current_price = current_data['Close'].values[0]
@@ -235,42 +161,33 @@ class StockUpdateThread(QThread):
 
     def run(self):
         while self.running:
+            print("Fetching latest data...")
             data = self.fetch_latest_data()
+            print(f"Data fetched: {data}")
             
-            if self.ensemble is None or self.scaler is None:
-                self.ensemble, self.scaler = self.train_ml_model()
+            if self.predictor is None:
+                print("Training model...")
+                try:
+                    self.predictor = self.train_ml_model()
+                    print("Model training completed")
+                except Exception as e:
+                    print(f"Error in model training: {e}")
+                    self.predictor = None  # Reset predictor if training fails
             
-            current_price = data['current_price']
-            stock_data = data['stock_data']
-            if stock_data:
-                dates, prices = zip(*stock_data)
-                latest_data = self.prepare_prediction_data(dates, prices, current_price)
-                next_day_prediction = self.predict_next_day_price(latest_data)
-                data['next_day_prediction'] = next_day_prediction
-                
-                # Add prediction and actual to tracker
-                self.model_tracker.add_prediction(next_day_prediction)
-                self.model_tracker.add_actual(current_price)
-                
-                # Update model weights every 30 days
-                if len(self.model_tracker.predictions) >= 30:
-                    accuracies = self.model_tracker.calculate_accuracies()
-                    self.ensemble.update_weights(accuracies)
-                    data['model_weights'] = self.ensemble.get_model_weights()
-                
-                # Calculate overall accuracy
-                accuracy_metrics = self.model_tracker.calculate_accuracy()
-                if accuracy_metrics:
-                    data['model_accuracy'] = accuracy_metrics['Accuracy']
-                    data['mape'] = accuracy_metrics['MAPE']
-                    data['rmse'] = accuracy_metrics['RMSE']
+            if self.predictor:
+                current_price = data['current_price']
+                stock_data = data['stock_data']
+                if stock_data:
+                    print("Preparing prediction data...")
+                    dates, prices = zip(*stock_data)
+                    latest_data = self.prepare_prediction_data(dates, prices, current_price)
+                    print("Making prediction...")
+                    next_day_prediction = self.predict_next_day_price(latest_data)
+                    data['next_day_prediction'] = next_day_prediction
+                    print(f"Next day prediction: {next_day_prediction}")
             
+            print("Emitting update signal...")
             self.update_signal.emit(data)
-            
-            self.days_since_last_retrain += 1
-            if self.days_since_last_retrain >= 30:  # Retrain every 30 days
-                self.ensemble, self.scaler = self.train_ml_model()
-                self.days_since_last_retrain = 0
             
             time.sleep(1)  # Update every second
 
@@ -365,6 +282,33 @@ class StockUpdateThread(QThread):
 
         return sum(sentiments) / len(sentiments) if sentiments else None
 
+    def prepare_prediction_data(self, dates, prices, current_price):
+        print("Preparing prediction data...")
+        df = pd.DataFrame({'Date': dates, 'Close': prices})
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df['Open'] = df['Close'].shift(1)
+        df['High'] = df['Close'].rolling(window=2).max()
+        df['Low'] = df['Close'].rolling(window=2).min()
+        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
+        
+        # Calculate features
+        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+        df['MACD'] = trend.MACD(df['Close']).macd()
+        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
+        df['Return'] = df['Close'].pct_change()
+        df['Volume_Change'] = df['Volume'].pct_change()
+        df['MA_5'] = df['Close'].rolling(window=5).mean()
+        df['MA_20'] = df['Close'].rolling(window=20).mean()
+        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
+
+        # Use the most recent data point
+        latest_data = df.iloc[-1:].copy()  # Create a copy to avoid SettingWithCopyWarning
+        latest_data.loc[latest_data.index[-1], 'Close'] = current_price  # Use the current price
+        print("Prediction data prepared:", latest_data)
+        return latest_data
 
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
@@ -507,39 +451,112 @@ class SentimentPopup(QDialog):
 
 
 
-class ExplicitRewardEnsemble:
-    def __init__(self, models):
-        self.models = models
-        self.weights = [1/len(models)] * len(models)
-        self.model_names = ['XGBoost', 'Random Forest', 'Neural Network']
+class ImprovedStockPredictor:
+    def __init__(self):
+        self.models = [
+            ('RF', RandomForestRegressor(n_estimators=100, random_state=42)),
+            ('GB', GradientBoostingRegressor(n_estimators=100, random_state=42)),
+            ('LSTM', None)  # LSTM model will be created during training
+        ]
+        self.ensemble = None
+        self.imputer = KNNImputer(n_neighbors=5)
+        self.feature_selector = None
+        self.scaler = StandardScaler()
 
+    def create_lstm_model(self, input_shape):
+        model = Sequential([
+            LSTM(50, return_sequences=True, input_shape=input_shape),
+            Dropout(0.2),
+            LSTM(50, return_sequences=False),
+            Dropout(0.2),
+            Dense(25),
+            Dense(1)
+        ])
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+        return model
+
+    def preprocess_data(self, X, y=None):
+        X_imputed = self.imputer.fit_transform(X)
+        if y is not None:
+            if self.feature_selector is None:
+                self.feature_selector = RFE(estimator=RandomForestRegressor(), n_features_to_select=min(10, X.shape[1]))
+            X_selected = self.feature_selector.fit_transform(X_imputed, y)
+            X_scaled = self.scaler.fit_transform(X_selected)
+        else:
+            if self.feature_selector is None:
+                return X_imputed, y
+            X_selected = self.feature_selector.transform(X_imputed)
+            X_scaled = self.scaler.transform(X_selected)
+        return X_scaled, y
+
+    def prepare_lstm_data(self, X, y, lookback):
+        X_lstm, y_lstm = [], []
+        for i in range(len(X) - lookback):
+            X_lstm.append(X[i:(i + lookback)])
+            y_lstm.append(y.iloc[i + lookback])
+        return np.array(X_lstm), np.array(y_lstm)
+
+    def train(self, X, y):
+        X_processed, y_processed = self.preprocess_data(X, y)
+        
+        tscv = TimeSeriesSplit(n_splits=5)
+        for name, model in self.models:
+            scores = []
+            for train_index, test_index in tscv.split(X_processed):
+                X_train, X_test = X_processed[train_index], X_processed[test_index]
+                y_train, y_test = y_processed.iloc[train_index], y_processed.iloc[test_index]
+                
+                if name == 'LSTM':
+                    try:
+                        signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(300)  # Set a 5-minute timeout
+
+                        lookback = 30  # Adjust as needed
+                        X_train_lstm, y_train_lstm = self.prepare_lstm_data(X_train, y_train, lookback)
+                        X_test_lstm, y_test_lstm = self.prepare_lstm_data(X_test, y_test, lookback)
+                        
+                        model = self.create_lstm_model((lookback, X_train.shape[1]))
+                        early_stopping = EarlyStopping(patience=10, restore_best_weights=True)
+                        model.fit(X_train_lstm, y_train_lstm, epochs=100, batch_size=32, 
+                                validation_split=0.2, callbacks=[early_stopping], verbose=0)
+                        
+                        y_pred = model.predict(X_test_lstm)
+                        score = -mean_squared_error(y_test_lstm, y_pred)  # Negative MSE for consistency with sklearn
+
+                        signal.alarm(0)  # Cancel the alarm if training completes successfully
+                    except TimeoutException:
+                        print("LSTM training timed out. Skipping LSTM model.")
+                        score = float('-inf')
+                    except Exception as e:
+                        print(f"Error in LSTM training: {e}")
+                        score = float('-inf')
+                else:
+                    model.fit(X_train, y_train)
+                    score = model.score(X_test, y_test)
+                
+                scores.append(score)
+            
+            print(f"{name} average score: {np.mean(scores)}")
+            
+            if name == 'LSTM':
+                self.models[2] = (name, model)  # Update LSTM model in the list
+        # Create a simple ensemble by averaging predictions
+        self.ensemble = self.models
 
     def predict(self, X):
-        predictions = [model.predict(X) for model in self.models]
-        return sum(w * p for w, p in zip(self.weights, predictions))
-
-
-    def update_weights(self, accuracies):
-        for i, (acc, name) in enumerate(zip(accuracies, self.model_names)):
-            if acc > 0.9:  # Reward threshold
-                self.weights[i] *= 1.5
-                print(f"{name} model performed exceptionally well! Increasing its weight.")
-            elif acc < 0.5:  # Punishment threshold
-                self.weights[i] *= 0.5
-                print(f"{name} model performed poorly. Decreasing its weight.")
+        X_processed, _ = self.preprocess_data(X)
+        predictions = []
+        
+        for name, model in self.ensemble:
+            if name == 'LSTM':
+                lookback = 30  # Should match the lookback used in training
+                X_lstm, _ = self.prepare_lstm_data(X_processed, np.zeros(len(X_processed)), lookback)
+                pred = model.predict(X_lstm)
+                predictions.append(pred.flatten())
             else:
-                print(f"{name} model performed adequately. Weight unchanged.")
+                predictions.append(model.predict(X_processed))
         
-        # Normalize weights
-        total = sum(self.weights)
-        self.weights = [w / total for w in self.weights]
-        
-        print("Updated model weights:", [f"{name}: {w:.2f}" for name, w in zip(self.model_names, self.weights)])
-
-
-    def get_model_weights(self):
-        return {name: weight for name, weight in zip(self.model_names, self.weights)}
-
+        return np.mean(predictions, axis=0)
 
 
 class MAGIStockAnalysis(QWidget):
@@ -583,6 +600,20 @@ class MAGIStockAnalysis(QWidget):
         self.setWindowState(Qt.WindowState.WindowFullScreen)
 
 
+    def open_sentiment_popup(self, url):
+        source = url.toString()
+        if source == 'nikkei':
+            sentiment = self.sentiment_to_text(self.nikkei_sentiment)
+            news_data = self.nikkei_news_data
+        elif source == 'yahoo':
+            sentiment = self.sentiment_to_text(self.yahoo_sentiment)
+            news_data = self.yahoo_news_data
+        else:
+            return
+
+        popup = SentimentPopup(source.capitalize(), sentiment, news_data)
+        popup.exec()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.showNormal()
@@ -590,6 +621,7 @@ class MAGIStockAnalysis(QWidget):
 
 
     def analyze_stock(self):
+        print("Analyze stock method called")
         stock_number = self.stock_input.text()
         purchase_price = self.price_input.text()
         if purchase_price.lower() == 'n/a' or purchase_price == '':
@@ -601,6 +633,8 @@ class MAGIStockAnalysis(QWidget):
                 self.show_error("Invalid purchase price. Using N/A.")
                 purchase_price = None
 
+        print(f"Stock number: {stock_number}, Purchase price: {purchase_price}")
+
         # Start flickering
         for component in [self.casper, self.balthasar, self.melchior]:
             self.start_flicker(component)
@@ -608,12 +642,16 @@ class MAGIStockAnalysis(QWidget):
 
         # Stop existing update thread if running
         if self.update_thread and self.update_thread.isRunning():
+            print("Stopping existing update thread")
             self.update_thread.stop()
             self.update_thread.wait()
 
         # Start new update thread
+        print("Creating new update thread")
         self.update_thread = StockUpdateThread(stock_number, self.ja_tokenizer, self.ja_model, self.en_tokenizer, self.en_model)
+        print("Connecting update signal...")
         self.update_thread.update_signal.connect(lambda data: self.update_display(data, purchase_price))
+        print("Starting update thread...")
         self.update_thread.start()
 
 
@@ -812,6 +850,7 @@ class MAGIStockAnalysis(QWidget):
 
 
     def update_display(self, data, purchase_price):
+        print("Updating display with data:", data)
         try:
             self.current_stock_data = data['stock_data']
             current_price = data['current_price']
@@ -836,7 +875,7 @@ class MAGIStockAnalysis(QWidget):
                 prediction_change = ((next_day_prediction - current_price) / current_price) * 100
                 next_day_prediction_text = f"¥{next_day_prediction:.2f} ({prediction_change:+.2f}%)"
             else:
-                next_day_prediction_text = "N/A"
+                next_day_prediction_text = "Prediction not available"
 
             casper_content = f"""
                 <p>Company: {company_name}</p>
@@ -924,21 +963,6 @@ class MAGIStockAnalysis(QWidget):
             self.open_sentiment_popup(anchor)
         else:
             super(QTextEdit, textedit).mousePressEvent(event)
-
-
-    def open_sentiment_popup(self, url):
-        source = url.toString()
-        if source == 'nikkei':
-            sentiment = self.sentiment_to_text(self.nikkei_sentiment)
-            news_data = self.nikkei_news_data
-        elif source == 'yahoo':
-            sentiment = self.sentiment_to_text(self.yahoo_sentiment)
-            news_data = self.yahoo_news_data
-        else:
-            return
-
-        popup = SentimentPopup(source.capitalize(), sentiment, news_data)
-        popup.exec()
 
 
     def update_component_with_flicker(self, component, new_text):
@@ -1169,6 +1193,7 @@ class ModelTracker:
 
 
 if __name__ == '__main__':
+    print("Starting MAGI Stock Analysis application...")
     app = QApplication(sys.argv)
     ex = MAGIStockAnalysis()
     ex.show()
