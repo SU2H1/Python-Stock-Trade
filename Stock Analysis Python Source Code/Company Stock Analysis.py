@@ -78,6 +78,7 @@ class StockUpdateThread(QThread):
         self.model_tracker = ModelTracker()
         self.days_since_last_retrain = 0
 
+
     def train_ml_model(self):
         try:
             # Fetch all available historical data
@@ -166,46 +167,120 @@ class StockUpdateThread(QThread):
             print(f"Error in train_ml_model: {e}")
             return None, None
 
-    def predict_next_day_price(self, current_data):
+    def prepare_prediction_data(self, dates, prices, current_price):
+        print("Preparing prediction data...")
+        try:
+            # Create DataFrame with latest data first
+            df = pd.DataFrame({'Date': dates, 'Close': prices})
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            df = df.sort_index(ascending=False)  # Most recent first
+            
+            # Generate features using latest data
+            df['Open'] = df['Close'].shift(-1).fillna(df['Close'])
+            df['High'] = df['Close'] * 1.02
+            df['Low'] = df['Close'] * 0.98
+            
+            # Get actual volume
+            try:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=1)
+                recent_data = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+                last_volume = recent_data['Volume'].iloc[-1] if not recent_data.empty else 1000000
+            except Exception as e:
+                print(f"Error fetching volume data: {e}")
+                last_volume = 1000000
+                
+            df['Volume'] = last_volume
+            
+            # Calculate technical indicators
+            df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+            df['MACD'] = trend.MACD(df['Close']).macd()
+            df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+            df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+            df['VWAP'] = VolumeWeightedAveragePrice(
+                high=df['High'], 
+                low=df['Low'], 
+                close=df['Close'], 
+                volume=df['Volume']
+            ).volume_weighted_average_price()
+            
+            # Calculate more features
+            df['Return'] = df['Close'].pct_change(-1)  # Note the -1 since data is reversed
+            df['Volume_Change'] = df['Volume'].pct_change(-1)
+            df['MA_5'] = df['Close'].rolling(window=5).mean()
+            df['MA_20'] = df['Close'].rolling(window=20).mean()
+            
+            # Get Nikkei return
+            try:
+                nikkei_data = yf.download("^N225", start=start_date, end=end_date)
+                df['Nikkei_Return'] = nikkei_data['Close'].pct_change().iloc[-1] if not nikkei_data.empty else 0
+            except Exception as e:
+                print(f"Error fetching Nikkei data: {e}")
+                df['Nikkei_Return'] = 0
+
+            # Clean up data
+            df = df.fillna(method='ffill').fillna(method='bfill')
+            
+            # Use the most recent data point
+            latest_data = df.iloc[0:1].copy()  # Get the most recent row
+            if current_price is not None:
+                latest_data.loc[latest_data.index[0], 'Close'] = current_price
+
+            print("Latest data for prediction:")
+            print(f"Date: {latest_data.index[0]}")
+            print(f"Current price: {latest_data['Close'].iloc[0]:.2f}")
+            print(f"Features shape: {latest_data.shape}")
+            
+            return latest_data
+
+        except Exception as e:
+            print(f"Error in prepare_prediction_data: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def predict_next_day_price(self, latest_data):
         try:
             if self.predictor is None:
-                print("No trained model available")
+                print("No trained model available for prediction")
                 return None
-                
+
+            print("Making prediction with latest data...")
             features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
-                    'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
-                    'MA_5', 'MA_20', 'Nikkei_Return']
-                    
-            # Verify all features are present
-            if not all(feature in current_data.columns for feature in features):
-                missing_features = [f for f in features if f not in current_data.columns]
-                print(f"Missing features: {missing_features}")
-                return None
-                
-            input_data = current_data[features].values.reshape(1, -1)
+                        'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
+                        'MA_5', 'MA_20', 'Nikkei_Return']
+
+            print("Available features:", latest_data.columns.tolist())
+            X = latest_data[features]
+            print("Input features shape:", X.shape)
+
+            # Handle missing values
+            X = X.fillna(method='ffill').fillna(method='bfill')
             
             # Make prediction
-            try:
-                prediction = self.predictor.predict(input_data)[0]
-                current_price = current_data['Close'].values[0]
-                
-                # Sanity check: limit prediction to ±5% of current price
-                max_change = 0.05
-                final_prediction = np.clip(
-                    prediction,
-                    current_price * (1 - max_change),
-                    current_price * (1 + max_change)
-                )
-                
-                print(f"Predicted price: {final_prediction:.2f}")
-                return final_prediction
-                
-            except Exception as e:
-                print(f"Error in prediction: {e}")
-                return None
-                
+            prediction = self.predictor.predict(X)[0]
+            current_price = latest_data['Close'].iloc[0]
+            
+            # Calculate percentage change
+            pct_change = ((prediction - current_price) / current_price) * 100
+            
+            # Limit maximum daily change to ±7%
+            MAX_DAILY_CHANGE = 7.0
+            if abs(pct_change) > MAX_DAILY_CHANGE:
+                print(f"Warning: Prediction {pct_change:.2f}% exceeded maximum daily change of ±{MAX_DAILY_CHANGE}%")
+                if pct_change > 0:
+                    prediction = current_price * (1 + MAX_DAILY_CHANGE/100)
+                else:
+                    prediction = current_price * (1 - MAX_DAILY_CHANGE/100)
+                print(f"Adjusted prediction to {prediction:.2f} ({MAX_DAILY_CHANGE if pct_change > 0 else -MAX_DAILY_CHANGE:.2f}%)")
+
+            return prediction
+            
         except Exception as e:
             print(f"Error in predict_next_day_price: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 
@@ -218,26 +293,16 @@ class StockUpdateThread(QThread):
                 current_price = data['current_price']
                 stock_data = data['stock_data']
                 
-                # Train model if not already trained
+                # Train model if not already 
                 if self.predictor is None:
                     print("Training model...")
-                    try:
-                        self.predictor, accuracy = self.train_ml_model()
-                        if accuracy is not None:
-                            self.current_accuracy = accuracy
-                            data['model_accuracy'] = accuracy
-                            print(f"Model trained successfully with {accuracy:.2%} accuracy")
-                        else:
-                            data['model_accuracy'] = None
-                            print("Model trained but accuracy calculation failed")
-                    except Exception as e:
-                        print(f"Error in model training: {e}")
-                        self.predictor = None
+                    self.predictor, accuracy = self.train_ml_model()
+                    if accuracy is not None:
+                        self.current_accuracy = accuracy
+                        data['model_accuracy'] = accuracy
+                    else:
                         data['model_accuracy'] = None
-                else:
-                    # Use stored accuracy for subsequent updates
-                    data['model_accuracy'] = getattr(self, 'current_accuracy', None)
-
+                
                 # Make prediction if possible
                 if self.predictor and stock_data and len(stock_data) > 0:
                     try:
@@ -246,12 +311,17 @@ class StockUpdateThread(QThread):
                         
                         if latest_data is not None:
                             next_day_prediction = self.predict_next_day_price(latest_data)
+                            print(f"Prediction result: {next_day_prediction}")
                             data['next_day_prediction'] = next_day_prediction
                         else:
+                            print("Failed to prepare prediction data")
                             data['next_day_prediction'] = None
                     except Exception as e:
                         print(f"Error in prediction process: {e}")
                         data['next_day_prediction'] = None
+                else:
+                    print("Cannot make prediction: predictor or stock data not available")
+                    data['next_day_prediction'] = None
                 
                 print("Emitting update signal...")
                 self.update_signal.emit(data)
@@ -357,76 +427,6 @@ class StockUpdateThread(QThread):
 
         return sum(sentiments) / len(sentiments) if sentiments else None
 
-    def prepare_prediction_data(self, dates, prices, current_price):
-        print("Preparing prediction data...")
-        try:
-            # Create DataFrame with dates and prices
-            df = pd.DataFrame({'Date': dates, 'Close': prices})
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-            
-            # Generate realistic data for other required features
-            df['Open'] = df['Close'].shift(1).fillna(df['Close'])
-            df['High'] = df['Close'] * 1.02  # Assume high is 2% above close
-            df['Low'] = df['Close'] * 0.98   # Assume low is 2% below close
-            
-            # Get actual volume data using yfinance for the last available date
-            try:
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=1)
-                recent_data = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
-                if not recent_data.empty:
-                    last_volume = recent_data['Volume'].iloc[-1]
-                else:
-                    last_volume = 1000000  # fallback volume
-            except Exception as e:
-                print(f"Error fetching volume data: {e}")
-                last_volume = 1000000  # fallback volume
-                
-            df['Volume'] = last_volume
-            
-            # Calculate technical indicators
-            df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
-            df['MACD'] = trend.MACD(df['Close']).macd()
-            df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
-            df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
-            df['VWAP'] = VolumeWeightedAveragePrice(
-                high=df['High'], 
-                low=df['Low'], 
-                close=df['Close'], 
-                volume=df['Volume']
-            ).volume_weighted_average_price()
-            
-            df['Return'] = df['Close'].pct_change()
-            df['Volume_Change'] = df['Volume'].pct_change()
-            df['MA_5'] = df['Close'].rolling(window=5).mean()
-            df['MA_20'] = df['Close'].rolling(window=20).mean()
-            
-            # Get Nikkei return
-            try:
-                nikkei_data = yf.download("^N225", start=start_date, end=end_date)
-                if not nikkei_data.empty:
-                    df['Nikkei_Return'] = nikkei_data['Close'].pct_change().iloc[-1]
-                else:
-                    df['Nikkei_Return'] = 0
-            except Exception as e:
-                print(f"Error fetching Nikkei data: {e}")
-                df['Nikkei_Return'] = 0
-
-            # Handle NaN values
-            df = df.fillna(method='ffill').fillna(method='bfill')
-            
-            # Use the most recent data point
-            latest_data = df.iloc[-1:].copy()
-            if current_price is not None:
-                latest_data.loc[latest_data.index[-1], 'Close'] = current_price
-
-            print("Prediction data prepared:", latest_data)
-            return latest_data
-
-        except Exception as e:
-            print(f"Error in prepare_prediction_data: {e}")
-            return None
 
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
