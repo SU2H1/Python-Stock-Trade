@@ -79,117 +79,170 @@ class StockUpdateThread(QThread):
         self.days_since_last_retrain = 0
 
     def train_ml_model(self):
-        # Fetch historical data for the stock
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=365*10)  # 10 years of data
-        df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+        try:
+            # Fetch historical data for the stock
+            print("Fetching historical data...")
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=365*2)  # 2 years of data
+            df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+            
+            if df.empty:
+                print("No historical data available")
+                return None
 
-        # Fetch Nikkei 225 data
-        nikkei_df = yf.download("^N225", start=start_date, end=end_date)
-        df['Nikkei_Return'] = nikkei_df['Close'].pct_change()
-
-        # Feature engineering
-        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
-        df['MACD'] = trend.MACD(df['Close']).macd()
-        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
-        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
-        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
-        df['Return'] = df['Close'].pct_change()
-        df['Volume_Change'] = df['Volume'].pct_change()
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        
-        # Improved data preprocessing
-        df['Volume'] = np.log1p(df['Volume'])  # Log-transform volume
-        df['Volume_Change'] = df['Volume_Change'].clip(-1, 5)  # Cap between -100% and 500%
-        df = df[df['Volume'] > 0]  # Remove days with zero volume
-        
-        # Prepare features and target
-        features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 'MA_5', 'MA_20', 'Nikkei_Return']
-        
-        # Shift the target variable (next day's closing price)
-        df['Target'] = df['Close'].shift(-1)
-        
-        # Drop rows with NaN values
-        df.dropna(inplace=True)
-        
-        X = df[features]
-        y = df['Target']
-        
-        # Handle infinite values
-        X = X.replace([np.inf, -np.inf], np.nan)
-        
-        # Fill NaN values with the median of the respective column
-        X = X.fillna(X.median())
-        
-        # Ensure X and y have the same number of samples
-        if len(X) != len(y):
-            min_len = min(len(X), len(y))
-            X = X.iloc[:min_len]
-            y = y.iloc[:min_len]
-        
-        # Train the improved predictor
-        self.predictor = ImprovedStockPredictor()
-        self.predictor.train(X, y)
-        
-        # Evaluate the model on the entire dataset
-        X_processed, _ = self.predictor.preprocess_data(X)
-        y_pred = self.predictor.predict(X_processed)
-        mse = mean_squared_error(y, y_pred)
-        rmse = np.sqrt(mse)
-        print(f"Model RMSE on entire dataset: {rmse}")
-        
-        return self.predictor
+            # Feature engineering
+            print("Creating features...")
+            df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+            df['MACD'] = trend.MACD(df['Close']).macd()
+            df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+            df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+            df['VWAP'] = VolumeWeightedAveragePrice(
+                high=df['High'],
+                low=df['Low'],
+                close=df['Close'],
+                volume=df['Volume']
+            ).volume_weighted_average_price()
+            df['Return'] = df['Close'].pct_change()
+            df['Volume_Change'] = df['Volume'].pct_change()
+            df['MA_5'] = df['Close'].rolling(window=5).mean()
+            df['MA_20'] = df['Close'].rolling(window=20).mean()
+            
+            # Try to get Nikkei data, use 0 if not available
+            try:
+                nikkei_df = yf.download("^N225", start=start_date, end=end_date)
+                df['Nikkei_Return'] = nikkei_df['Close'].pct_change()
+            except Exception as e:
+                print(f"Error fetching Nikkei data: {e}")
+                df['Nikkei_Return'] = 0
+            
+            # Prepare features and target
+            features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
+                    'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
+                    'MA_5', 'MA_20', 'Nikkei_Return']
+            
+            # Shift the target variable (next day's closing price)
+            df['Target'] = df['Close'].shift(-1)
+            
+            # Drop rows with NaN values
+            df.dropna(inplace=True)
+            
+            if len(df) < 30:  # Need minimum amount of data
+                print("Insufficient data for training")
+                return None
+                
+            X = df[features]
+            y = df['Target']
+            
+            # Handle infinite values
+            X = X.replace([np.inf, -np.inf], np.nan)
+            X = X.fillna(X.median())
+            
+            # Train a simple RandomForestRegressor instead of complex ensemble
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X, y)
+            
+            print("Model training completed successfully")
+            return model
+            
+        except Exception as e:
+            print(f"Error in train_ml_model: {e}")
+            return None
 
     def predict_next_day_price(self, current_data):
-        features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 'MA_5', 'MA_20', 'Nikkei_Return']
-        input_data = current_data[features].values.reshape(1, -1)
-        
-        # Handle potential infinite values
-        input_data = np.where(np.isinf(input_data), np.nan, input_data)
-        input_data = np.nan_to_num(input_data, nan=np.nanmean(input_data))  # Replace NaN with mean
-        
-        # Make prediction using the improved predictor
-        prediction = self.predictor.predict(input_data)[0]
-        
-        # Sanity check: limit the prediction to a reasonable range (e.g., ±5% of current price)
-        current_price = current_data['Close'].values[0]
-        max_change = 0.05  # 5% maximum change
-        final_prediction = np.clip(prediction, current_price * (1 - max_change), current_price * (1 + max_change))
-        
-        return final_prediction
+        try:
+            if self.predictor is None:
+                print("No trained model available")
+                return None
+                
+            features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
+                    'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
+                    'MA_5', 'MA_20', 'Nikkei_Return']
+                    
+            # Verify all features are present
+            if not all(feature in current_data.columns for feature in features):
+                missing_features = [f for f in features if f not in current_data.columns]
+                print(f"Missing features: {missing_features}")
+                return None
+                
+            input_data = current_data[features].values.reshape(1, -1)
+            
+            # Make prediction
+            try:
+                prediction = self.predictor.predict(input_data)[0]
+                current_price = current_data['Close'].values[0]
+                
+                # Sanity check: limit prediction to ±5% of current price
+                max_change = 0.05
+                final_prediction = np.clip(
+                    prediction,
+                    current_price * (1 - max_change),
+                    current_price * (1 + max_change)
+                )
+                
+                print(f"Predicted price: {final_prediction:.2f}")
+                return final_prediction
+                
+            except Exception as e:
+                print(f"Error in prediction: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"Error in predict_next_day_price: {e}")
+            return None
+
 
     def run(self):
         while self.running:
-            print("Fetching latest data...")
-            data = self.fetch_latest_data()
-            print(f"Data fetched: {data}")
-            
-            if self.predictor is None:
-                print("Training model...")
-                try:
-                    self.predictor = self.train_ml_model()
-                    print("Model training completed")
-                except Exception as e:
-                    print(f"Error in model training: {e}")
-                    self.predictor = None  # Reset predictor if training fails
-            
-            if self.predictor:
+            try:
+                print("Fetching latest data...")
+                data = self.fetch_latest_data()
+                print(f"Data fetched: {data}")
+                
                 current_price = data['current_price']
                 stock_data = data['stock_data']
-                if stock_data:
+                
+                # Train model if not already trained
+                if self.predictor is None:
+                    print("Training model...")
+                    try:
+                        self.predictor = self.train_ml_model()
+                        print("Model training completed")
+                    except Exception as e:
+                        print(f"Error in model training: {e}")
+                        self.predictor = None
+
+                # Make prediction if we have the necessary data
+                if self.predictor and stock_data and len(stock_data) > 0:
                     print("Preparing prediction data...")
-                    dates, prices = zip(*stock_data)
-                    latest_data = self.prepare_prediction_data(dates, prices, current_price)
-                    print("Making prediction...")
-                    next_day_prediction = self.predict_next_day_price(latest_data)
-                    data['next_day_prediction'] = next_day_prediction
-                    print(f"Next day prediction: {next_day_prediction}")
-            
-            print("Emitting update signal...")
-            self.update_signal.emit(data)
-            
-            time.sleep(1)  # Update every second
+                    try:
+                        dates, prices = zip(*stock_data)
+                        latest_data = self.prepare_prediction_data(dates, prices, current_price)
+                        
+                        if latest_data is not None:
+                            print("Making prediction...")
+                            next_day_prediction = self.predict_next_day_price(latest_data)
+                            print(f"Next day prediction: {next_day_prediction}")
+                            data['next_day_prediction'] = next_day_prediction
+                        else:
+                            print("Could not prepare prediction data")
+                            data['next_day_prediction'] = None
+                    except Exception as e:
+                        print(f"Error in prediction process: {e}")
+                        data['next_day_prediction'] = None
+                else:
+                    print("Skipping prediction due to missing data or model")
+                    data['next_day_prediction'] = None
+                
+                print("Emitting update signal...")
+                self.update_signal.emit(data)
+                
+                time.sleep(1)  # Update every second
+                
+            except Exception as e:
+                print(f"Error in run loop: {e}")
+                time.sleep(1)  # Wait before retrying
+
+        print("Update thread stopped")
 
 
     def fetch_latest_data(self):
@@ -284,31 +337,74 @@ class StockUpdateThread(QThread):
 
     def prepare_prediction_data(self, dates, prices, current_price):
         print("Preparing prediction data...")
-        df = pd.DataFrame({'Date': dates, 'Close': prices})
-        df['Date'] = pd.to_datetime(df['Date'])
-        df.set_index('Date', inplace=True)
-        df['Open'] = df['Close'].shift(1)
-        df['High'] = df['Close'].rolling(window=2).max()
-        df['Low'] = df['Close'].rolling(window=2).min()
-        df['Volume'] = np.random.randint(1000000, 10000000, size=len(df))  # Dummy volume data
-        
-        # Calculate features
-        df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
-        df['MACD'] = trend.MACD(df['Close']).macd()
-        df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
-        df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
-        df['VWAP'] = VolumeWeightedAveragePrice(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
-        df['Return'] = df['Close'].pct_change()
-        df['Volume_Change'] = df['Volume'].pct_change()
-        df['MA_5'] = df['Close'].rolling(window=5).mean()
-        df['MA_20'] = df['Close'].rolling(window=20).mean()
-        df['Nikkei_Return'] = 0  # Placeholder, ideally you'd fetch real Nikkei data
+        try:
+            # Create DataFrame with dates and prices
+            df = pd.DataFrame({'Date': dates, 'Close': prices})
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            
+            # Generate realistic data for other required features
+            df['Open'] = df['Close'].shift(1).fillna(df['Close'])
+            df['High'] = df['Close'] * 1.02  # Assume high is 2% above close
+            df['Low'] = df['Close'] * 0.98   # Assume low is 2% below close
+            
+            # Get actual volume data using yfinance for the last available date
+            try:
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=1)
+                recent_data = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+                if not recent_data.empty:
+                    last_volume = recent_data['Volume'].iloc[-1]
+                else:
+                    last_volume = 1000000  # fallback volume
+            except Exception as e:
+                print(f"Error fetching volume data: {e}")
+                last_volume = 1000000  # fallback volume
+                
+            df['Volume'] = last_volume
+            
+            # Calculate technical indicators
+            df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
+            df['MACD'] = trend.MACD(df['Close']).macd()
+            df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
+            df['BB_Low'] = volatility.BollingerBands(df['Close']).bollinger_lband()
+            df['VWAP'] = VolumeWeightedAveragePrice(
+                high=df['High'], 
+                low=df['Low'], 
+                close=df['Close'], 
+                volume=df['Volume']
+            ).volume_weighted_average_price()
+            
+            df['Return'] = df['Close'].pct_change()
+            df['Volume_Change'] = df['Volume'].pct_change()
+            df['MA_5'] = df['Close'].rolling(window=5).mean()
+            df['MA_20'] = df['Close'].rolling(window=20).mean()
+            
+            # Get Nikkei return
+            try:
+                nikkei_data = yf.download("^N225", start=start_date, end=end_date)
+                if not nikkei_data.empty:
+                    df['Nikkei_Return'] = nikkei_data['Close'].pct_change().iloc[-1]
+                else:
+                    df['Nikkei_Return'] = 0
+            except Exception as e:
+                print(f"Error fetching Nikkei data: {e}")
+                df['Nikkei_Return'] = 0
 
-        # Use the most recent data point
-        latest_data = df.iloc[-1:].copy()  # Create a copy to avoid SettingWithCopyWarning
-        latest_data.loc[latest_data.index[-1], 'Close'] = current_price  # Use the current price
-        print("Prediction data prepared:", latest_data)
-        return latest_data
+            # Handle NaN values
+            df = df.fillna(method='ffill').fillna(method='bfill')
+            
+            # Use the most recent data point
+            latest_data = df.iloc[-1:].copy()
+            if current_price is not None:
+                latest_data.loc[latest_data.index[-1], 'Close'] = current_price
+
+            print("Prediction data prepared:", latest_data)
+            return latest_data
+
+        except Exception as e:
+            print(f"Error in prepare_prediction_data: {e}")
+            return None
 
     def get_company_name(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
