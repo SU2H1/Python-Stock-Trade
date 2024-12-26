@@ -80,15 +80,19 @@ class StockUpdateThread(QThread):
 
     def train_ml_model(self):
         try:
-            # Fetch historical data for the stock
-            print("Fetching historical data...")
+            # Fetch all available historical data
+            print("Fetching complete historical data...")
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=365*2)  # 2 years of data
-            df = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+            
+            # Get maximum available data
+            df = yf.download(f"{self.stock_number}.T")
             
             if df.empty:
                 print("No historical data available")
-                return None
+                return None, None
+                
+            print(f"Data available from {df.index[0]} to {df.index[-1]}")
+            print(f"Total data points: {len(df)}")
 
             # Feature engineering
             print("Creating features...")
@@ -107,29 +111,26 @@ class StockUpdateThread(QThread):
             df['MA_5'] = df['Close'].rolling(window=5).mean()
             df['MA_20'] = df['Close'].rolling(window=20).mean()
             
-            # Try to get Nikkei data, use 0 if not available
             try:
-                nikkei_df = yf.download("^N225", start=start_date, end=end_date)
+                nikkei_df = yf.download("^N225", start=df.index[0], end=end_date)
                 df['Nikkei_Return'] = nikkei_df['Close'].pct_change()
             except Exception as e:
                 print(f"Error fetching Nikkei data: {e}")
                 df['Nikkei_Return'] = 0
             
-            # Prepare features and target
             features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
                     'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
                     'MA_5', 'MA_20', 'Nikkei_Return']
             
-            # Shift the target variable (next day's closing price)
             df['Target'] = df['Close'].shift(-1)
-            
-            # Drop rows with NaN values
             df.dropna(inplace=True)
             
-            if len(df) < 30:  # Need minimum amount of data
+            if len(df) < 30:
                 print("Insufficient data for training")
-                return None
+                return None, None
                 
+            print(f"Training on {len(df)} data points")
+            
             X = df[features]
             y = df['Target']
             
@@ -137,16 +138,39 @@ class StockUpdateThread(QThread):
             X = X.replace([np.inf, -np.inf], np.nan)
             X = X.fillna(X.median())
             
-            # Train a simple RandomForestRegressor instead of complex ensemble
+            # Split the data into training and testing sets
+            train_size = int(len(df) * 0.8)
+            X_train = X[:train_size]
+            X_test = X[train_size:]
+            y_train = y[:train_size]
+            y_test = y[train_size:]
+            
+            # Train the model
             model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X, y)
+            model.fit(X_train, y_train)
             
-            print("Model training completed successfully")
-            return model
+            # Calculate accuracy metrics
+            y_pred = model.predict(X_test)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            accuracy = 1 - np.mean(np.abs((y_test - y_pred) / y_test))
             
+            print(f"\nModel Performance Metrics:")
+            print(f"RMSE: {rmse:.2f}")
+            print(f"Accuracy: {accuracy:.2%}")
+            
+            # Print feature importances
+            feature_importance = dict(zip(features, model.feature_importances_))
+            print("\nFeature Importances:")
+            for feature, importance in sorted(feature_importance.items(), key=lambda x: x[1], reverse=True):
+                print(f"{feature}: {importance:.4f}")
+            
+            return model, accuracy
+                
         except Exception as e:
             print(f"Error in train_ml_model: {e}")
-            return None
+            return None, None
+
 
     def predict_next_day_price(self, current_data):
         try:
@@ -205,11 +229,13 @@ class StockUpdateThread(QThread):
                 if self.predictor is None:
                     print("Training model...")
                     try:
-                        self.predictor = self.train_ml_model()
+                        self.predictor, model_accuracy = self.train_ml_model()
+                        data['model_accuracy'] = model_accuracy
                         print("Model training completed")
                     except Exception as e:
                         print(f"Error in model training: {e}")
                         self.predictor = None
+                        data['model_accuracy'] = None
 
                 # Make prediction if we have the necessary data
                 if self.predictor and stock_data and len(stock_data) > 0:
