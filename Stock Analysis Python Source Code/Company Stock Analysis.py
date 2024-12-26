@@ -81,11 +81,10 @@ class StockUpdateThread(QThread):
 
     def train_ml_model(self):
         try:
-            # Fetch all available historical data
             print("Fetching complete historical data...")
             end_date = datetime.now()
             
-            # Get maximum available data
+            # Get maximum available data for the stock
             df = yf.download(f"{self.stock_number}.T")
             
             if df.empty:
@@ -95,8 +94,8 @@ class StockUpdateThread(QThread):
             print(f"Data available from {df.index[0]} to {df.index[-1]}")
             print(f"Total data points: {len(df)}")
 
-            # Feature engineering
-            print("Creating features...")
+            # Technical indicators (existing)
+            print("Creating technical features...")
             df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
             df['MACD'] = trend.MACD(df['Close']).macd()
             df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
@@ -107,30 +106,75 @@ class StockUpdateThread(QThread):
                 close=df['Close'],
                 volume=df['Volume']
             ).volume_weighted_average_price()
+            
+            # Additional technical indicators
+            print("Adding enhanced technical features...")
+            df['EMA_9'] = df['Close'].ewm(span=9).mean()
+            df['SMA_50'] = df['Close'].rolling(window=50).mean()
+            df['SMA_200'] = df['Close'].rolling(window=200).mean()
+            df['ADX'] = trend.ADXIndicator(df['High'], df['Low'], df['Close']).adx()
+            df['ATR'] = volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
+            
+            # Market breadth indicators
+            print("Adding market indicators...")
+            try:
+                # Nikkei 225 data
+                nikkei = yf.download("^N225", start=df.index[0], end=end_date)
+                df['Nikkei_Return'] = nikkei['Close'].pct_change()
+                df['Nikkei_Volatility'] = nikkei['Close'].rolling(window=20).std()
+                
+                # USD/JPY exchange rate
+                usdjpy = yf.download("USDJPY=X", start=df.index[0], end=end_date)
+                df['USDJPY_Return'] = usdjpy['Close'].pct_change()
+                
+                # TOPIX index
+                topix = yf.download("1605.T", start=df.index[0], end=end_date)
+                df['TOPIX_Return'] = topix['Close'].pct_change()
+                
+                # Interest rate proxy (10-year JGB)
+                jgb = yf.download("^TNX", start=df.index[0], end=end_date)
+                df['Interest_Rate_Change'] = jgb['Close'].pct_change()
+                
+            except Exception as e:
+                print(f"Error fetching market data: {e}")
+                # Fill with zeros if data fetch fails
+                df['Nikkei_Return'] = 0
+                df['Nikkei_Volatility'] = 0
+                df['USDJPY_Return'] = 0
+                df['TOPIX_Return'] = 0
+                df['Interest_Rate_Change'] = 0
+
+            # Price and volume features
             df['Return'] = df['Close'].pct_change()
             df['Volume_Change'] = df['Volume'].pct_change()
             df['MA_5'] = df['Close'].rolling(window=5).mean()
             df['MA_20'] = df['Close'].rolling(window=20).mean()
             
-            try:
-                nikkei_df = yf.download("^N225", start=df.index[0], end=end_date)
-                df['Nikkei_Return'] = nikkei_df['Close'].pct_change()
-            except Exception as e:
-                print(f"Error fetching Nikkei data: {e}")
-                df['Nikkei_Return'] = 0
+            # Volatility and momentum features
+            df['Daily_Volatility'] = df['Close'].rolling(window=20).std()
+            df['Price_Range'] = (df['High'] - df['Low']) / df['Close']
+            df['Gap'] = df['Open'] - df['Close'].shift(1)
             
-            features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
-                    'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
-                    'MA_5', 'MA_20', 'Nikkei_Return']
+            # Target variable
+            df['Target'] = df['Close'].shift(-1)
             
-            df['Target'] = df['Close'].shift(-1)  # Next day's closing price
+            features = [
+                'Open', 'High', 'Low', 'Close', 'Volume',
+                'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP',
+                'EMA_9', 'SMA_50', 'SMA_200', 'ADX', 'ATR',
+                'Return', 'Volume_Change', 'MA_5', 'MA_20',
+                'Nikkei_Return', 'Nikkei_Volatility', 'USDJPY_Return',
+                'TOPIX_Return', 'Interest_Rate_Change',
+                'Daily_Volatility', 'Price_Range', 'Gap'
+            ]
+            
             df.dropna(inplace=True)
             
             if len(df) < 30:
                 print("Insufficient data for training")
                 return None, None
                     
-            print(f"Training on {len(df)} data points")
+            print(f"Training on {len(df)} data points with {len(features)} features")
             
             X = df[features]
             y = df['Target']
@@ -146,26 +190,40 @@ class StockUpdateThread(QThread):
             y_train = y[:train_size]
             y_test = y[train_size:]
             
-            # Train the model
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            # Train an enhanced Random Forest model
+            model = RandomForestRegressor(
+                n_estimators=200,  # Increased from 100
+                max_depth=15,      # Added max_depth
+                min_samples_split=5,
+                min_samples_leaf=3,
+                random_state=42
+            )
             model.fit(X_train, y_train)
             
             # Calculate accuracy metrics
             y_pred = model.predict(X_test)
             mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
-            accuracy = 100 - mape  # Convert to percentage accuracy
+            accuracy = 100 - mape
             
-            # Ensure accuracy is within reasonable bounds
-            accuracy = max(min(accuracy, 100), 0)
+            # Print feature importances
+            importances = pd.Series(
+                model.feature_importances_,
+                index=features
+            ).sort_values(ascending=False)
+            print("\nTop 10 most important features:")
+            print(importances.head(10))
             
             print(f"\nModel Performance Metrics:")
             print(f"Accuracy: {accuracy:.2f}%")
             
-            return model, accuracy / 100  # Return accuracy as decimal
-                
+            return model, accuracy / 100
+            
         except Exception as e:
             print(f"Error in train_ml_model: {e}")
+            import traceback
+            traceback.print_exc()
             return None, None
+
 
     def prepare_prediction_data(self, dates, prices, current_price):
         print("Preparing prediction data...")
@@ -176,24 +234,36 @@ class StockUpdateThread(QThread):
             df.set_index('Date', inplace=True)
             df = df.sort_index(ascending=False)  # Most recent first
             
-            # Generate features using latest data
+            # Get historical data for better feature calculation
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=250)  # Get more data for SMA200
+            
+            try:
+                hist_data = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+                if not hist_data.empty:
+                    # Merge historical data with current data
+                    df = pd.concat([df, hist_data[~hist_data.index.isin(df.index)]])
+                    df = df.sort_index(ascending=False)
+            except Exception as e:
+                print(f"Error fetching historical data: {e}")
+            
+            # Basic price data
             df['Open'] = df['Close'].shift(-1).fillna(df['Close'])
             df['High'] = df['Close'] * 1.02
             df['Low'] = df['Close'] * 0.98
             
             # Get actual volume
             try:
-                end_date = datetime.now()
-                start_date = end_date - timedelta(days=1)
-                recent_data = yf.download(f"{self.stock_number}.T", start=start_date, end=end_date)
+                recent_data = yf.download(f"{self.stock_number}.T", start=end_date-timedelta(days=1), end=end_date)
                 last_volume = recent_data['Volume'].iloc[-1] if not recent_data.empty else 1000000
             except Exception as e:
                 print(f"Error fetching volume data: {e}")
                 last_volume = 1000000
                 
             df['Volume'] = last_volume
-            
-            # Calculate technical indicators
+
+            # Technical indicators
+            print("Calculating technical indicators...")
             df['RSI'] = momentum.RSIIndicator(df['Close']).rsi()
             df['MACD'] = trend.MACD(df['Close']).macd()
             df['BB_High'] = volatility.BollingerBands(df['Close']).bollinger_hband()
@@ -204,21 +274,53 @@ class StockUpdateThread(QThread):
                 close=df['Close'], 
                 volume=df['Volume']
             ).volume_weighted_average_price()
+
+            # Enhanced technical indicators
+            df['EMA_9'] = df['Close'].ewm(span=9).mean()
+            df['SMA_50'] = df['Close'].rolling(window=50).mean()
+            df['SMA_200'] = df['Close'].rolling(window=200).mean()
+            df['ADX'] = trend.ADXIndicator(df['High'], df['Low'], df['Close']).adx()
+            df['ATR'] = volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
             
-            # Calculate more features
+            # Market data
+            print("Fetching market data...")
+            try:
+                # Nikkei 225
+                nikkei = yf.download("^N225", start=end_date-timedelta(days=30), end=end_date)
+                df['Nikkei_Return'] = nikkei['Close'].pct_change().iloc[-1] if not nikkei.empty else 0
+                df['Nikkei_Volatility'] = nikkei['Close'].rolling(window=20).std().iloc[-1] if not nikkei.empty else 0
+                
+                # USD/JPY
+                usdjpy = yf.download("USDJPY=X", start=end_date-timedelta(days=30), end=end_date)
+                df['USDJPY_Return'] = usdjpy['Close'].pct_change().iloc[-1] if not usdjpy.empty else 0
+                
+                # TOPIX
+                topix = yf.download("1605.T", start=end_date-timedelta(days=30), end=end_date)
+                df['TOPIX_Return'] = topix['Close'].pct_change().iloc[-1] if not topix.empty else 0
+                
+                # Interest rate (10-year JGB)
+                jgb = yf.download("^TNX", start=end_date-timedelta(days=30), end=end_date)
+                df['Interest_Rate_Change'] = jgb['Close'].pct_change().iloc[-1] if not jgb.empty else 0
+                
+            except Exception as e:
+                print(f"Error fetching market data: {e}")
+                df['Nikkei_Return'] = 0
+                df['Nikkei_Volatility'] = 0
+                df['USDJPY_Return'] = 0
+                df['TOPIX_Return'] = 0
+                df['Interest_Rate_Change'] = 0
+            
+            # Price and volume features
             df['Return'] = df['Close'].pct_change(-1)  # Note the -1 since data is reversed
             df['Volume_Change'] = df['Volume'].pct_change(-1)
             df['MA_5'] = df['Close'].rolling(window=5).mean()
             df['MA_20'] = df['Close'].rolling(window=20).mean()
             
-            # Get Nikkei return
-            try:
-                nikkei_data = yf.download("^N225", start=start_date, end=end_date)
-                df['Nikkei_Return'] = nikkei_data['Close'].pct_change().iloc[-1] if not nikkei_data.empty else 0
-            except Exception as e:
-                print(f"Error fetching Nikkei data: {e}")
-                df['Nikkei_Return'] = 0
-
+            # Volatility and momentum features
+            df['Daily_Volatility'] = df['Close'].rolling(window=20).std()
+            df['Price_Range'] = (df['High'] - df['Low']) / df['Close']
+            df['Gap'] = df['Open'] - df['Close'].shift(-1)  # Note the -1 since data is reversed
+            
             # Clean up data
             df = df.fillna(method='ffill').fillna(method='bfill')
             
@@ -231,6 +333,7 @@ class StockUpdateThread(QThread):
             print(f"Date: {latest_data.index[0]}")
             print(f"Current price: {latest_data['Close'].iloc[0]:.2f}")
             print(f"Features shape: {latest_data.shape}")
+            print("Available features:", latest_data.columns.tolist())
             
             return latest_data
 
@@ -240,6 +343,7 @@ class StockUpdateThread(QThread):
             traceback.print_exc()
             return None
 
+
     def predict_next_day_price(self, latest_data):
         try:
             if self.predictor is None:
@@ -247,13 +351,20 @@ class StockUpdateThread(QThread):
                 return None
 
             print("Making prediction with latest data...")
-            features = ['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD', 
-                        'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
-                        'MA_5', 'MA_20', 'Nikkei_Return']
+            features = [
+                'Open', 'High', 'Low', 'Close', 'Volume',
+                'RSI', 'MACD', 'BB_High', 'BB_Low', 'VWAP',
+                'EMA_9', 'SMA_50', 'SMA_200', 'ADX', 'ATR',
+                'Return', 'Volume_Change', 'MA_5', 'MA_20',
+                'Nikkei_Return', 'Nikkei_Volatility', 'USDJPY_Return',
+                'TOPIX_Return', 'Interest_Rate_Change',
+                'Daily_Volatility', 'Price_Range', 'Gap'
+            ]
 
             print("Available features:", latest_data.columns.tolist())
             X = latest_data[features]
             print("Input features shape:", X.shape)
+            print("Feature values:", X.iloc[0].to_dict())  # Print actual values for debugging
 
             # Handle missing values
             X = X.fillna(method='ffill').fillna(method='bfill')
