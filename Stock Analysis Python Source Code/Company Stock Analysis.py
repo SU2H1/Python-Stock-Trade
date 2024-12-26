@@ -866,6 +866,10 @@ class MAGIStockAnalysis(QWidget):
             roe = data.get('roe')
             next_day_prediction = data.get('next_day_prediction')
 
+            # Get current price from stock data if it's not available directly
+            if current_price is None and self.current_stock_data:
+                current_price = self.current_stock_data[0][1]  # Get the most recent price
+
             # Calculate overall sentiment only if both sentiments are numeric
             overall_sentiment = None
             if isinstance(self.nikkei_sentiment, (int, float)) and isinstance(self.yahoo_sentiment, (int, float)):
@@ -917,21 +921,19 @@ class MAGIStockAnalysis(QWidget):
             else:
                 casper_browser.setHtml(casper_content)
 
+            # Format metrics with proper conditional handling
+            psr_display = f"{psr_val:.2f}" if psr_val is not None else "N/A"
+            pbr_display = f"{pbr_val:.2f}" if pbr_val is not None else "N/A"
+            roa_display = f"{roa_val:.2f}%" if roa_val is not None else "N/A"
+            roe_display = f"{roe_val:.2f}%" if roe_val is not None else "N/A"
+
             # Update BALTHASAR
-            balthasar_browser = self.balthasar.findChild(QTextBrowser)
-            
             recommendation_parts = recommendation.split('\n', 1)
             action = recommendation_parts[0]
             explanation = recommendation_parts[1] if len(recommendation_parts) > 1 else ""
             
             model_accuracy = data.get('model_accuracy', 'N/A')
             model_accuracy_text = f"{model_accuracy:.2%}" if isinstance(model_accuracy, float) else model_accuracy
-            
-            # Format metrics with proper conditional handling
-            psr_display = f"{psr_val:.2f}" if psr_val is not None else "N/A"
-            pbr_display = f"{pbr_val:.2f}" if pbr_val is not None else "N/A"
-            roa_display = f"{roa_val:.2f}%" if roa_val is not None else "N/A"
-            roe_display = f"{roe_val:.2f}%" if roe_val is not None else "N/A"
             
             key_metrics = f"""
             <p>PSR: {psr_display} | PBR: {pbr_display}</p>
@@ -946,12 +948,12 @@ class MAGIStockAnalysis(QWidget):
             <p><a href='detailed_explanation'>Click for detailed explanation</a></p>
             """
             
+            balthasar_browser = self.balthasar.findChild(QTextBrowser)
             if self.has_content_changed('balthasar', balthasar_content):
                 self.update_component_with_flicker(self.balthasar, balthasar_content)
             else:
                 balthasar_browser.setHtml(balthasar_content)
             
-            # Disconnect any existing connections to avoid multiple connections
             try:
                 balthasar_browser.anchorClicked.disconnect()
             except:
@@ -962,14 +964,16 @@ class MAGIStockAnalysis(QWidget):
             )
 
             # Update MELCHIOR
-            current_price_text = f"¥{float(current_price):.2f}" if current_price is not None else "N/A"
-            purchase_price_text = f"¥{float(purchase_price):.2f}" if purchase_price is not None else "N/A"
-            
-            # Format metrics with proper conditional handling for Melchior
-            psr_display = f"{psr_val:.2f}" if psr_val is not None else "N/A"
-            pbr_display = f"{pbr_val:.2f}" if pbr_val is not None else "N/A"
-            roa_display = f"{roa_val:.2f}" if roa_val is not None else "N/A"
-            roe_display = f"{roe_val:.2f}" if roe_val is not None else "N/A"
+            # Handle current price with proper type checking and conversion
+            try:
+                current_price_text = f"¥{float(current_price):.2f}" if current_price not in (None, "", "N/A") else "N/A"
+            except (ValueError, TypeError):
+                current_price_text = "N/A"
+                
+            try:
+                purchase_price_text = f"¥{float(purchase_price):.2f}" if purchase_price not in (None, "", "N/A") else "N/A"
+            except (ValueError, TypeError):
+                purchase_price_text = "N/A"
             
             melchior_content = f"""
                 <p>Current Price: {current_price_text}</p>
@@ -977,8 +981,8 @@ class MAGIStockAnalysis(QWidget):
                 <p>Price Difference: {self.calculate_price_difference(current_price, purchase_price)}</p>
                 <p>PSR: {psr_display} - {psr_comment}</p>
                 <p>PBR: {pbr_display} - {pbr_comment}</p>
-                <p>ROA: {roa_display}%</p>
-                <p>ROE: {roe_display}%</p>
+                <p>ROA: {roa_display}</p>
+                <p>ROE: {roe_display}</p>
             """
             melchior_browser = self.melchior.findChild(QTextBrowser)
             if self.has_content_changed('melchior', melchior_content):
