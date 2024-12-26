@@ -122,13 +122,13 @@ class StockUpdateThread(QThread):
                     'BB_High', 'BB_Low', 'VWAP', 'Return', 'Volume_Change', 
                     'MA_5', 'MA_20', 'Nikkei_Return']
             
-            df['Target'] = df['Close'].shift(-1)
+            df['Target'] = df['Close'].shift(-1)  # Next day's closing price
             df.dropna(inplace=True)
             
             if len(df) < 30:
                 print("Insufficient data for training")
                 return None, None
-                
+                    
             print(f"Training on {len(df)} data points")
             
             X = df[features]
@@ -151,26 +151,20 @@ class StockUpdateThread(QThread):
             
             # Calculate accuracy metrics
             y_pred = model.predict(X_test)
-            mse = mean_squared_error(y_test, y_pred)
-            rmse = np.sqrt(mse)
-            accuracy = 1 - np.mean(np.abs((y_test - y_pred) / y_test))
+            mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+            accuracy = 100 - mape  # Convert to percentage accuracy
+            
+            # Ensure accuracy is within reasonable bounds
+            accuracy = max(min(accuracy, 100), 0)
             
             print(f"\nModel Performance Metrics:")
-            print(f"RMSE: {rmse:.2f}")
-            print(f"Accuracy: {accuracy:.2%}")
+            print(f"Accuracy: {accuracy:.2f}%")
             
-            # Print feature importances
-            feature_importance = dict(zip(features, model.feature_importances_))
-            print("\nFeature Importances:")
-            for feature, importance in sorted(feature_importance.items(), key=lambda x: x[1], reverse=True):
-                print(f"{feature}: {importance:.4f}")
-            
-            return model, accuracy
+            return model, accuracy / 100  # Return accuracy as decimal
                 
         except Exception as e:
             print(f"Error in train_ml_model: {e}")
             return None, None
-
 
     def predict_next_day_price(self, current_data):
         try:
@@ -220,7 +214,6 @@ class StockUpdateThread(QThread):
             try:
                 print("Fetching latest data...")
                 data = self.fetch_latest_data()
-                print(f"Data fetched: {data}")
                 
                 current_price = data['current_price']
                 stock_data = data['stock_data']
@@ -229,46 +222,44 @@ class StockUpdateThread(QThread):
                 if self.predictor is None:
                     print("Training model...")
                     try:
-                        self.predictor, model_accuracy = self.train_ml_model()
-                        data['model_accuracy'] = model_accuracy
-                        print("Model training completed")
+                        self.predictor, accuracy = self.train_ml_model()
+                        if accuracy is not None:
+                            self.current_accuracy = accuracy
+                            data['model_accuracy'] = accuracy
+                            print(f"Model trained successfully with {accuracy:.2%} accuracy")
+                        else:
+                            data['model_accuracy'] = None
+                            print("Model trained but accuracy calculation failed")
                     except Exception as e:
                         print(f"Error in model training: {e}")
                         self.predictor = None
                         data['model_accuracy'] = None
+                else:
+                    # Use stored accuracy for subsequent updates
+                    data['model_accuracy'] = getattr(self, 'current_accuracy', None)
 
-                # Make prediction if we have the necessary data
+                # Make prediction if possible
                 if self.predictor and stock_data and len(stock_data) > 0:
-                    print("Preparing prediction data...")
                     try:
                         dates, prices = zip(*stock_data)
                         latest_data = self.prepare_prediction_data(dates, prices, current_price)
                         
                         if latest_data is not None:
-                            print("Making prediction...")
                             next_day_prediction = self.predict_next_day_price(latest_data)
-                            print(f"Next day prediction: {next_day_prediction}")
                             data['next_day_prediction'] = next_day_prediction
                         else:
-                            print("Could not prepare prediction data")
                             data['next_day_prediction'] = None
                     except Exception as e:
                         print(f"Error in prediction process: {e}")
                         data['next_day_prediction'] = None
-                else:
-                    print("Skipping prediction due to missing data or model")
-                    data['next_day_prediction'] = None
                 
                 print("Emitting update signal...")
                 self.update_signal.emit(data)
-                
-                time.sleep(1)  # Update every second
+                time.sleep(1)
                 
             except Exception as e:
                 print(f"Error in run loop: {e}")
-                time.sleep(1)  # Wait before retrying
-
-        print("Update thread stopped")
+                time.sleep(1)
 
 
     def fetch_latest_data(self):
@@ -282,6 +273,11 @@ class StockUpdateThread(QThread):
         psr, pbr = self.scrape_psr_pbr()
         roa, roe = self.scrape_roa_roe()
         
+        # Store model accuracy if we have a trained model
+        model_accuracy = None
+        if hasattr(self, 'current_accuracy'):
+            model_accuracy = self.current_accuracy
+        
         return {
             'current_price': current_price,
             'company_name': company_name,
@@ -293,9 +289,9 @@ class StockUpdateThread(QThread):
             'psr': psr,
             'pbr': pbr,
             'roa': roa,
-            'roe': roe
+            'roe': roe,
+            'model_accuracy': model_accuracy
         }
-
 
     def get_current_stock_price(self):
         url = f"https://finance.yahoo.co.jp/quote/{self.stock_number}.T"
@@ -1054,9 +1050,15 @@ class MAGIStockAnalysis(QWidget):
             action = recommendation_parts[0]
             explanation = recommendation_parts[1] if len(recommendation_parts) > 1 else ""
             
-            model_accuracy = data.get('model_accuracy', 'N/A')
-            model_accuracy_text = f"{model_accuracy:.2%}" if isinstance(model_accuracy, float) else model_accuracy
-            
+            model_accuracy = data.get('model_accuracy')
+            if isinstance(model_accuracy, (float, int)):
+                if 0 <= model_accuracy <= 1:
+                    model_accuracy_text = f"{model_accuracy:.2%}"
+                else:
+                    model_accuracy_text = f"{model_accuracy:.2f}%"
+            else:
+                model_accuracy_text = "Calculating..."
+
             key_metrics = f"""
             <p>PSR: {psr_display} | PBR: {pbr_display}</p>
             <p>ROA: {roa_display} | ROE: {roe_display}</p>
