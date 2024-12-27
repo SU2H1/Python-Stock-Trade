@@ -1120,6 +1120,7 @@ class ImprovedStockPredictor:
         self.feature_selector = None
         self.scaler = StandardScaler()
 
+
     def create_lstm_model(self, input_shape):
         model = Sequential([
             LSTM(50, return_sequences=True, input_shape=input_shape),
@@ -1131,6 +1132,7 @@ class ImprovedStockPredictor:
         ])
         model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
         return model
+
 
     def preprocess_data(self, X, y=None):
         X_imputed = self.imputer.fit_transform(X)
@@ -1146,12 +1148,14 @@ class ImprovedStockPredictor:
             X_scaled = self.scaler.transform(X_selected)
         return X_scaled, y
 
+
     def prepare_lstm_data(self, X, y, lookback):
         X_lstm, y_lstm = [], []
         for i in range(len(X) - lookback):
             X_lstm.append(X[i:(i + lookback)])
             y_lstm.append(y.iloc[i + lookback])
         return np.array(X_lstm), np.array(y_lstm)
+
 
     def train(self, X, y):
         X_processed, y_processed = self.preprocess_data(X, y)
@@ -1199,6 +1203,7 @@ class ImprovedStockPredictor:
                 self.models[2] = (name, model)  # Update LSTM model in the list
         # Create a simple ensemble by averaging predictions
         self.ensemble = self.models
+
 
     def predict(self, X):
         X_processed, _ = self.preprocess_data(X)
@@ -1888,73 +1893,148 @@ class ModelTracker:
         self.prediction_history = []
         self.best_model = None
         self.best_accuracy = 0
-        self.model_path = 'best_model.pkl'
-        self.selected_features = None  # Add this to store selected features
+        self.model_path = 'universal_model.pkl'
+        self.training_data_path = 'training_history.pkl'
+        self.selected_features = None
+        self.training_history = {'stocks': set(), 'features': {}, 'performance': {}}
+        
+        # Load existing model and training history
+        self.load_model()
+        self.load_training_history()
 
-        # Load the model if it exists
-        if os.path.exists(self.model_path):
-            self.load_model()  # Automatically load on initialization
+    def load_training_history(self):
+        """Load historical training data"""
+        try:
+            if os.path.exists(self.training_data_path):
+                with open(self.training_data_path, 'rb') as f:
+                    self.training_history = pickle.load(f)
+                print(f"Loaded training history for {len(self.training_history['stocks'])} stocks")
+        except Exception as e:
+            print(f"Error loading training history: {e}")
 
-    def save_model(self, model, accuracy, scaler=None, selected_features=None):
-        """Saves the model if it's better than the current best model."""
-        if accuracy > self.best_accuracy:
+    def save_training_history(self):
+        """Save training history to disk"""
+        try:
+            with open(self.training_data_path, 'wb') as f:
+                pickle.dump(self.training_history, f)
+            print("Training history saved successfully")
+        except Exception as e:
+            print(f"Error saving training history: {e}")
+
+    def update_training_history(self, stock_number, features, performance):
+        """Update training history with new stock data"""
+        self.training_history['stocks'].add(stock_number)
+        
+        # Update feature importance
+        for feature, importance in features.items():
+            if feature not in self.training_history['features']:
+                self.training_history['features'][feature] = []
+            self.training_history['features'][feature].append(importance)
+        
+        # Update performance metrics
+        self.training_history['performance'][stock_number] = performance
+        
+        # Save updated history
+        self.save_training_history()
+
+    def get_universal_feature_importance(self):
+        """Calculate universal feature importance across all stocks"""
+        if not self.training_history['features']:
+            return {}
+        
+        universal_importance = {}
+        for feature, importances in self.training_history['features'].items():
+            universal_importance[feature] = np.mean(importances)
+        
+        return universal_importance
+
+    def save_model(self, model, accuracy, scaler=None, selected_features=None, stock_number=None):
+        """Save model with universal learning components"""
+        is_improvement = accuracy > self.best_accuracy
+        
+        if is_improvement:
             self.best_model = model
             self.best_accuracy = accuracy
             self.scaler = scaler
-            self.selected_features = selected_features  # Store selected features
+            self.selected_features = selected_features
+
+            # Calculate feature importance
+            feature_importance = {}
+            if hasattr(model, 'feature_importances_'):
+                for feature, importance in zip(selected_features, model.feature_importances_):
+                    feature_importance[feature] = importance
+            elif hasattr(model, 'estimators_'):
+                # For ensemble models, average feature importance across estimators
+                importances = []
+                for estimator in model.estimators_:
+                    if hasattr(estimator, 'feature_importances_'):
+                        importances.append(estimator.feature_importances_)
+                if importances:
+                    avg_importance = np.mean(importances, axis=0)
+                    for feature, importance in zip(selected_features, avg_importance):
+                        feature_importance[feature] = importance
+
+            # Update training history
+            if stock_number:
+                performance = {
+                    'accuracy': accuracy,
+                    'date': datetime.now(),
+                    'feature_importance': feature_importance
+                }
+                self.update_training_history(stock_number, feature_importance, performance)
 
             try:
                 with open(self.model_path, 'wb') as f:
-                    pickle.dump({
+                    model_data = {
                         'model': model,
                         'accuracy': accuracy,
                         'scaler': scaler,
-                        'selected_features': selected_features  # Save selected features
-                    }, f)
-                print(f"Saved new best model with accuracy: {accuracy}")
-
-                # Verify saved content
-                try:
-                    with open(self.model_path, 'rb') as f:
-                        saved_data = pickle.load(f)
-                    if 'scaler' in saved_data:
-                        print("Scaler successfully saved")
-                    else:
-                        print("Warning: Scaler not saved properly")
-                    if 'selected_features' in saved_data:
-                        print("Selected features successfully saved")
-                    else:
-                        print("Warning: Selected features not saved properly")
-                except Exception as e:
-                    print(f"Warning: Could not verify saved model: {e}")
-
+                        'selected_features': selected_features,
+                        'universal_features': self.get_universal_feature_importance(),
+                        'training_history': self.training_history
+                    }
+                    pickle.dump(model_data, f)
+                print(f"Saved new model with accuracy: {accuracy}")
+                
             except Exception as e:
                 print(f"Error saving model: {e}")
+                traceback.print_exc()
 
     def load_model(self):
-        """Loads a saved model if it exists."""
+        """Load model with universal learning components"""
         if os.path.exists(self.model_path):
             try:
                 with open(self.model_path, 'rb') as f:
-                    saved_data = pickle.load(f)
-                    self.best_model = saved_data['model']
-                    self.best_accuracy = saved_data['accuracy']
-                    self.scaler = saved_data.get('scaler')  # Load scaler
-                    self.selected_features = saved_data.get('selected_features') # Load selected features
-                    print(f"Loaded saved model with accuracy: {self.best_accuracy}")
-                    if self.scaler:
-                        print("Scaler loaded successfully")
-                    if self.selected_features:
-                        print("Selected features loaded successfully")
+                    model_data = pickle.load(f)
+                    self.best_model = model_data['model']
+                    self.best_accuracy = model_data['accuracy']
+                    self.scaler = model_data.get('scaler')
+                    self.selected_features = model_data.get('selected_features')
+                    
+                    # Load universal learning components
+                    if 'training_history' in model_data:
+                        self.training_history = model_data['training_history']
+                    
+                    print(f"Loaded model with accuracy: {self.best_accuracy}")
+                    print(f"Model has learned from {len(self.training_history['stocks'])} different stocks")
                     return True
+                    
             except Exception as e:
-                print(f"Error loading saved model: {e}")
+                print(f"Error loading model: {e}")
                 traceback.print_exc()
         return False
 
+    def get_feature_recommendations(self):
+        """Get feature recommendations based on universal learning"""
+        if not self.training_history['features']:
+            return None
+            
+        feature_importance = self.get_universal_feature_importance()
+        sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+        return [feature for feature, _ in sorted_features[:50]]  # Top 50 most important features
 
     def track_performance(self, actual, predicted):
-        """予測性能を追跡"""
+        """Track prediction performance"""
         try:
             accuracy = 1 - mean_absolute_percentage_error([actual], [predicted])
             self.accuracy_history.append(accuracy)
@@ -1965,15 +2045,6 @@ class ModelTracker:
             })
         except Exception as e:
             print(f"Error tracking performance: {e}")
-
-    def get_average_accuracy(self, window=30):
-        """直近の精度の平均を計算"""
-        if len(self.accuracy_history) == 0:
-            return None
-        recent = self.accuracy_history[-window:]
-        return sum(recent) / len(recent)
-
-    def get_prediction_statistics(self):
         """予測の統計情報を取得"""
         if len(self.prediction_history) == 0:
             return None
