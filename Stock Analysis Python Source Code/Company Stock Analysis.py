@@ -55,7 +55,7 @@ class DataFetcher:
         """Fetches historical stock data using yfinance."""
         ticker = f"{stock_number}.T"
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=365 * 5) # 5 years of data
+        start_date = end_date - timedelta(days=365 * 20) #20 Years
         try:
             df = yf.download(ticker, start=start_date, end=end_date)
             if df.empty:
@@ -90,6 +90,93 @@ class TimeoutException(Exception):
     pass
 def timeout_handler(signum, frame):
     raise TimeoutException("LSTM training timed out")
+
+
+
+class DynamicWeightAdjuster:
+    def __init__(self, models):
+        """
+        Initialize the weight adjuster with a list of models.
+        
+        Args:
+            models: List of tuples (name, model)
+        """
+        self.models = models
+        self.weights = {name: 1.0/len(models) for name, _ in models}  # Start with equal weights
+        self.performance_history = {name: [] for name, _ in models}
+        self.window_size = 10  # Number of predictions to consider for weight adjustment
+
+
+    def update_weights(self, predictions, actual_value):
+        """
+        Update model weights based on their prediction accuracy.
+        
+        Args:
+            predictions: Dict of model predictions {model_name: prediction_value}
+            actual_value: The actual observed value
+        """
+        # Calculate errors for each model
+        errors = {}
+        for name in predictions:
+            error = abs((predictions[name] - actual_value) / actual_value)
+            self.performance_history[name].append(error)
+            
+            # Keep only the last window_size predictions
+            if len(self.performance_history[name]) > self.window_size:
+                self.performance_history[name].pop(0)
+            
+            # Calculate average error over the window
+            errors[name] = sum(self.performance_history[name]) / len(self.performance_history[name])
+        
+        # Convert errors to accuracy scores (1 - error)
+        accuracies = {name: 1 - error for name, error in errors.items()}
+        
+        # Calculate total accuracy
+        total_accuracy = sum(accuracies.values())
+        
+        if total_accuracy > 0:
+            # Update weights based on relative accuracy
+            self.weights = {name: acc/total_accuracy for name, acc in accuracies.items()}
+        else:
+            # If all models perform poorly, reset to equal weights
+            self.weights = {name: 1.0/len(self.models) for name, _ in self.models}
+            
+        return self.weights
+
+
+    def get_weighted_prediction(self, predictions):
+        """
+        Calculate weighted average prediction.
+        
+        Args:
+            predictions: Dict of model predictions {model_name: prediction_value}
+            
+        Returns:
+            float: Weighted average prediction
+        """
+        weighted_sum = sum(predictions[name] * self.weights[name] 
+                        for name in predictions)
+        return weighted_sum
+
+
+    def get_model_metrics(self):
+        """
+        Get current performance metrics for each model.
+        
+        Returns:
+            dict: Performance metrics for each model
+        """
+        metrics = {}
+        for name in self.weights:
+            if self.performance_history[name]:
+                avg_error = sum(self.performance_history[name]) / len(self.performance_history[name])
+                metrics[name] = {
+                    'current_weight': self.weights[name],
+                    'average_error': avg_error,
+                    'accuracy': 1 - avg_error,
+                    'predictions_in_window': len(self.performance_history[name])
+                }
+        return metrics
 
 
 
@@ -477,82 +564,36 @@ class StockUpdateThread(QThread):
                     random_state=42
                 ))
             ]
-
-            # Create and train ensemble
-            ensemble = VotingRegressor(estimators=models)
-            ensemble.fit(X_train_scaled, y_train)
-
-            try:
-                # Make predictions
-                y_pred = ensemble.predict(X_test_scaled)
-                
-                # Convert to numpy arrays for easier manipulation
-                y_test_values = np.array(y_test)
-                y_pred_values = np.array(y_pred)
-                
-                # Calculate directional accuracy using numpy arrays
-                y_test_diff = np.diff(y_test_values)
-                y_pred_diff = np.diff(y_pred_values)
-                
-                # Calculate directional accuracy (whether the signs match)
-                matching_directions = (np.sign(y_test_diff) == np.sign(y_pred_diff))
-                direction_accuracy = np.mean(matching_directions)
-                
-                # Calculate MAPE and handle zero values
-                non_zero_mask = y_test_values != 0
-                if np.any(non_zero_mask):
-                    mape = np.mean(np.abs((y_test_values[non_zero_mask] - y_pred_values[non_zero_mask]) 
-                                        / y_test_values[non_zero_mask]))
-                else:
-                    mape = np.mean(np.abs(y_test_values - y_pred_values))  # Fallback when all values are zero
-                
-                # Calculate RMSE and normalize it
-                rmse = np.sqrt(mean_squared_error(y_test_values, y_pred_values))
-                price_range = np.ptp(y_test_values)  # Peak to peak (max - min)
-                if price_range > 0:
-                    normalized_rmse = rmse / price_range
-                else:
-                    normalized_rmse = rmse
-                
-                # Calculate final accuracy score
-                direction_component = direction_accuracy
-                mape_component = np.clip(1 - mape, 0, 1)  # Convert MAPE to accuracy and clip
-                rmse_component = np.clip(1 - normalized_rmse, 0, 1)  # Convert RMSE to accuracy and clip
-                
-                # Combine components with weights
-                accuracy = (0.5 * direction_component +
-                        0.3 * mape_component +
-                        0.2 * rmse_component)
-                
-                # Ensure final accuracy is properly bounded
-                accuracy = np.clip(accuracy, 0, 1)
-                
-                print(f"\nDetailed Prediction Analysis:")
-                print(f"Direction Accuracy: {direction_accuracy:.4f}")
-                print(f"MAPE Score: {mape_component:.4f}")
-                print(f"RMSE Score: {rmse_component:.4f}")
-                print(f"Final Combined Accuracy: {accuracy:.4f}")
-                
-                # Save model if improved
-                if accuracy > 0:
-                    print(f"Saving model with accuracy: {accuracy}")
-                    self.model_tracker.save_model(ensemble, accuracy, self.scaler, self.selected_features)
-                
-                    # Compare with existing best model
-                    if self.model_tracker.best_model is not None:
-                        if accuracy < self.model_tracker.best_accuracy:
-                            print(f"Using previous best model with accuracy: {self.model_tracker.best_accuracy}")
-                            return self.model_tracker.best_model, self.model_tracker.best_accuracy
-                
-                # Assign the trained ensemble and return
-                self.predictor = ensemble
-                return ensemble, accuracy
-
-            except Exception as e:
-                print(f"Error in accuracy calculation: {e}")
-                traceback.print_exc()
-                self.predictor = ensemble  # Still assign the ensemble even if accuracy calculation fails
-                return ensemble, 0.0  # Return 0.0 accuracy on error
+            
+            # Initialize weight adjuster
+            self.weight_adjuster = DynamicWeightAdjuster(models)
+            
+            # Train each model separately
+            trained_models = {}
+            predictions = {}
+            
+            for name, model in models:
+                model.fit(X_train_scaled, y_train)
+                trained_models[name] = model
+                predictions[name] = model.predict(X_test_scaled)
+            
+            # Update weights based on initial performance
+            self.weight_adjuster.update_weights(
+                {name: predictions[name][-1] for name in predictions}, 
+                y_test.iloc[-1]
+            )
+            
+            # Get weighted predictions
+            weighted_predictions = []
+            for i in range(len(y_test)):
+                pred_at_i = {name: predictions[name][i] for name in predictions}
+                weighted_pred = self.weight_adjuster.get_weighted_prediction(pred_at_i)
+                weighted_predictions.append(weighted_pred)
+            
+            # Calculate accuracy metrics for weighted ensemble
+            accuracy = self.calculate_ensemble_accuracy(y_test, weighted_predictions)
+            
+            return trained_models, accuracy
 
         except Exception as e:
             print(f"Error in train_ml_model: {e}")
@@ -787,7 +828,36 @@ class StockUpdateThread(QThread):
 
             # Make prediction
             try:
-                prediction = self.predictor.predict(X_scaled)[0]
+                # Get predictions from individual models if using ensemble
+                if hasattr(self, 'weight_adjuster') and isinstance(self.predictor, dict):
+                    predictions = {}
+                    for name, model in self.predictor.items():
+                        try:
+                            pred = model.predict(X_scaled)[0]
+                            predictions[name] = pred
+                        except Exception as e:
+                            print(f"Error in model {name} prediction: {e}")
+                            predictions[name] = None
+                    
+                    # Filter out failed predictions
+                    predictions = {k: v for k, v in predictions.items() if v is not None}
+                    
+                    if not predictions:
+                        print("All models failed to make predictions")
+                        return None
+                    
+                    # Get weighted prediction
+                    if hasattr(self, 'weight_adjuster'):
+                        prediction = self.weight_adjuster.get_weighted_prediction(predictions)
+                        # Store for next update
+                        self.last_prediction = predictions
+                    else:
+                        # Fallback to simple average if weight adjuster not available
+                        prediction = sum(predictions.values()) / len(predictions)
+                else:
+                    # Single model prediction
+                    prediction = self.predictor.predict(X_scaled)[0]
+
                 current_price = latest_data['Close'].iloc[0]
 
                 # Calculate percentage change
@@ -805,6 +875,16 @@ class StockUpdateThread(QThread):
 
                 # Track the prediction
                 self.model_tracker.track_performance(current_price, prediction)
+
+                # Update weights if we have actual value from previous prediction
+                if hasattr(self, 'weight_adjuster') and hasattr(self, 'last_prediction') and hasattr(self, 'last_actual'):
+                    try:
+                        self.weight_adjuster.update_weights(self.last_prediction, self.last_actual)
+                    except Exception as e:
+                        print(f"Error updating weights: {e}")
+
+                # Store current price as last actual for next update
+                self.last_actual = current_price
 
                 print(f"Prediction successful: {prediction:.2f} (change: {pct_change:.2f}%)")
                 return prediction
