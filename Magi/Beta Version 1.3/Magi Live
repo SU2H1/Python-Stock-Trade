@@ -195,13 +195,19 @@ class StockUpdateThread(QThread):
         self.predictor = None
         self.model_tracker = ModelTracker()
         self.days_since_last_retrain = 0
-        self.data_fetcher = DataFetcher()  # Initialize DataFetcher here
+        self.data_fetcher = DataFetcher()
+        self.current_accuracy = None  # Initialize current_accuracy
 
         # Load the model if it exists
         if self.model_tracker.load_model():
             self.predictor = self.model_tracker.best_model
             self.scaler = self.model_tracker.scaler
-            self.selected_features = self.model_tracker.selected_features  # Load selected features
+            self.selected_features = self.model_tracker.selected_features
+            self.current_accuracy = self.model_tracker.best_accuracy  # Set initial accuracy
+
+
+    def stop(self):  # Add this method
+        self.running = False
 
 
     def handle_returns_calculation(self, y_true, y_pred):
@@ -256,6 +262,23 @@ class StockUpdateThread(QThread):
         Scrapes analyst consensus and financial forecast data from Minkabu
         Returns a dictionary containing analyst recommendations and financial forecasts
         """
+        # Initialize consensus_data at the start
+        consensus_data = {
+            'strong_buy': 0,
+            'buy': 0,
+            'neutral': 0,
+            'target_price': None,
+            'price_potential': None
+        }
+        
+        # Initialize forecasts
+        forecasts = {
+            'revenue': [],
+            'net_profit': [],
+            'operating_profit': [],
+            'ordinary_profit': []
+        }
+        
         url = f"https://minkabu.jp/stock/{self.stock_number}/analyst_consensus"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -269,14 +292,6 @@ class StockUpdateThread(QThread):
             # Extract analyst consensus
             consensus_text = soup.find('p', string=lambda text: text and '時点における' in text)
             if consensus_text:
-                consensus_data = {
-                    'strong_buy': 0,
-                    'buy': 0,
-                    'neutral': 0,
-                    'target_price': None,
-                    'price_potential': None
-                }
-                
                 text = consensus_text.text
                 
                 # Extract number of analysts for each recommendation
@@ -302,15 +317,7 @@ class StockUpdateThread(QThread):
                     direction = 1 if price_potential_match.group(2) == '上昇' else -1
                     consensus_data['price_potential'] = potential * direction
             
-            # Extract financial forecasts
-            forecasts = {
-                'revenue': [],
-                'net_profit': [],
-                'operating_profit': [],
-                'ordinary_profit': []
-            }
-            
-            # Find the table containing financial forecasts
+            # Extract financial forecasts from table
             table = soup.find('table', class_='md_table')
             if table:
                 rows = table.find_all('tr')
@@ -335,9 +342,43 @@ class StockUpdateThread(QThread):
                 'consensus': consensus_data,
                 'forecasts': forecasts
             }
-            
+                
         except Exception as e:
             print(f"Error in scrape_analyst_consensus: {e}")
+            return {
+                'consensus': consensus_data,
+                'forecasts': forecasts
+            }
+
+
+    def calculate_ensemble_accuracy(self, y_true, y_pred):
+        """
+        Calculate the ensemble model's accuracy using multiple metrics
+        """
+        try:
+            # Calculate MAPE (Mean Absolute Percentage Error)
+            mape = mean_absolute_percentage_error(y_true, y_pred)
+            accuracy = 1 - mape  # Convert MAPE to accuracy (0 to 1 scale)
+            
+            # Calculate RMSE (Root Mean Square Error)
+            rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+            
+            # Calculate directional accuracy (whether price movement direction was predicted correctly)
+            y_true_direction = np.sign(np.diff(np.array(y_true)))
+            y_pred_direction = np.sign(np.diff(np.array(y_pred)))
+            directional_accuracy = np.mean(y_true_direction == y_pred_direction)
+            
+            # Combine metrics into a weighted accuracy score
+            weighted_accuracy = (
+                0.4 * accuracy +  # MAPE-based accuracy
+                0.3 * np.exp(-rmse/1000) +  # Normalized RMSE (exponential decay)
+                0.3 * directional_accuracy  # Direction prediction accuracy
+            )
+            
+            return weighted_accuracy
+            
+        except Exception as e:
+            print(f"Error calculating accuracy: {e}")
             return None
 
 
@@ -445,28 +486,25 @@ class StockUpdateThread(QThread):
                         'Interest_Rate_Change', 'Interest_Rate_MA']:
                     df[col] = 0.0
 
-            # Add analyst consensus data
-            print("Fetching analyst consensus data...")
-            analyst_data = self.data_fetcher.scrape_analyst_consensus(self.stock_number)
+            # Add analyst consensus data if available
+            analyst_data = self.scrape_analyst_consensus()
             if analyst_data and analyst_data['consensus']:
                 consensus = analyst_data['consensus']
                 total_analysts = consensus['strong_buy'] + consensus['buy'] + consensus['neutral']
-
-                # Analyst recommendations
+                
                 if total_analysts > 0:
                     df['Analyst_Buy_Ratio'] = (consensus['strong_buy'] + consensus['buy']) / total_analysts
                     df['Analyst_Strong_Buy_Ratio'] = consensus['strong_buy'] / total_analysts
                     df['Analyst_Neutral_Ratio'] = consensus['neutral'] / total_analysts
-
-                # Target price analysis
+                
                 if consensus['target_price'] is not None:
                     df['Price_To_Target_Ratio'] = df['Close'] / consensus['target_price']
                     df['Target_Price_Premium'] = (consensus['target_price'] - df['Close']) / df['Close']
-
-                # Price potential
+                
                 if consensus['price_potential'] is not None:
                     df['Analyst_Price_Potential'] = consensus['price_potential']
-                    df['Price_Potential_Signal'] = (consensus['price_potential'] > 0).astype(int)
+                    # Fix for the boolean conversion issue
+                    df['Price_Potential_Signal'] = pd.Series([1 if consensus['price_potential'] > 0 else 0], index=df.index)
 
             # Add forecast features
             print("Processing financial forecasts...")
@@ -583,7 +621,6 @@ class StockUpdateThread(QThread):
                 y_test.iloc[-1]
             )
             
-            # Get weighted predictions
             weighted_predictions = []
             for i in range(len(y_test)):
                 pred_at_i = {name: predictions[name][i] for name in predictions}
@@ -592,13 +629,23 @@ class StockUpdateThread(QThread):
             
             # Calculate accuracy metrics for weighted ensemble
             accuracy = self.calculate_ensemble_accuracy(y_test, weighted_predictions)
+            if accuracy is not None:
+                print(f"Model accuracy: {accuracy:.4f}")
+                # Store accuracy in instance variable
+                self.current_accuracy = accuracy
+                # Save model with accuracy
+                self.model_tracker.save_model(trained_models, accuracy, self.scaler, self.selected_features)
+            else:
+                print("Failed to calculate model accuracy")
+                self.current_accuracy = None
             
             return trained_models, accuracy
-
+            
         except Exception as e:
             print(f"Error in train_ml_model: {e}")
             traceback.print_exc()
             return None, None
+
 
     def prepare_prediction_data(self, dates, prices, current_price):
         print("Preparing prediction data...")
@@ -655,7 +702,11 @@ class StockUpdateThread(QThread):
                 
                 if consensus['price_potential'] is not None:
                     df['Analyst_Price_Potential'] = consensus['price_potential']
-                    df['Price_Potential_Signal'] = (consensus['price_potential'] > 0).astype(int)
+                    # Fix for the boolean conversion issue - create a Series with proper index
+                    df['Price_Potential_Signal'] = pd.Series(
+                        [1 if consensus['price_potential'] > 0 else 0] * len(df),
+                        index=df.index
+                    )
 
             # Add forecast features
             if analyst_data and analyst_data['forecasts']:
@@ -666,14 +717,20 @@ class StockUpdateThread(QThread):
                     revenue_growth = ((forecasts['revenue'][-1] - forecasts['revenue'][-2]) /
                                     forecasts['revenue'][-2])
                     df['Expected_Revenue_Growth'] = revenue_growth
-                    df['Revenue_Growth_Signal'] = (revenue_growth > 0).astype(int)
+                    df['Revenue_Growth_Signal'] = pd.Series(
+                        [1 if revenue_growth > 0 else 0] * len(df),
+                        index=df.index
+                    )
 
                 # Profit metrics
                 if forecasts['net_profit'] and len(forecasts['net_profit']) >= 2:
                     profit_growth = ((forecasts['net_profit'][-1] - forecasts['net_profit'][-2]) /
                                     forecasts['net_profit'][-2])
                     df['Expected_Profit_Growth'] = profit_growth
-                    df['Profit_Growth_Signal'] = (profit_growth > 0).astype(int)
+                    df['Profit_Growth_Signal'] = pd.Series(
+                        [1 if profit_growth > 0 else 0] * len(df),
+                        index=df.index
+                    )
 
             # Use the most recent data point
             latest_data = df.iloc[0:1].copy()
@@ -693,7 +750,7 @@ class StockUpdateThread(QThread):
                 print(f"Final features for prediction: {latest_data.columns.tolist()}")
 
             # Fill any remaining NaN values
-            latest_data = latest_data.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            latest_data = latest_data.ffill().bfill().fillna(0)
             
             # Verify no NaN values remain
             if latest_data.isnull().values.any():
@@ -706,6 +763,7 @@ class StockUpdateThread(QThread):
             print(f"Error in prepare_prediction_data: {e}")
             traceback.print_exc()
             return None
+
 
     def calculate_features(self, df):
         """Calculate all technical indicators and features"""
@@ -784,7 +842,7 @@ class StockUpdateThread(QThread):
                 for col in market_columns:
                     df[col] = 0.0
 
-            return df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            return df.ffill().bfill().fillna(0)
 
         except Exception as e:
             print(f"Error in calculate_features: {e}")
@@ -909,15 +967,20 @@ class StockUpdateThread(QThread):
                 current_price = data['current_price']
                 stock_data = data['stock_data']
                 
-                # Train model if not already 
+                # Train model if not already trained
                 if self.predictor is None:
                     print("Training model...")
                     self.predictor, accuracy = self.train_ml_model()
                     if accuracy is not None:
-                        self.current_accuracy = accuracy
+                        print(f"Model trained successfully with accuracy: {accuracy:.4f}")
+                        self.current_accuracy = accuracy  # Store accuracy
                         data['model_accuracy'] = accuracy
                     else:
+                        print("Model training failed or no accuracy available")
                         data['model_accuracy'] = None
+                else:
+                    # Use stored accuracy
+                    data['model_accuracy'] = self.current_accuracy
                 
                 # Make prediction if possible
                 if self.predictor and stock_data and len(stock_data) > 0:
@@ -945,6 +1008,7 @@ class StockUpdateThread(QThread):
                 
             except Exception as e:
                 print(f"Error in run loop: {e}")
+                traceback.print_exc()  # Add traceback for better error debugging
                 time.sleep(1)
 
 
@@ -1677,13 +1741,18 @@ class MAGIStockAnalysis(QWidget):
                 model_accuracy = data.get('model_accuracy')
                 if isinstance(model_accuracy, (float, int)):
                     if 0 <= model_accuracy <= 1:
-                        # Assuming accuracy is 1 - MAPE, format as percentage
                         model_accuracy_text = f"{model_accuracy:.2%}"
                     else:
-                        # Could be an error or another metric
-                        model_accuracy_text = f"Value: {model_accuracy:.2f}" 
+                        model_accuracy_text = f"Value: {model_accuracy:.4f}"
                 else:
-                    model_accuracy_text = "Calculating..."
+                    if self.update_thread and hasattr(self.update_thread, 'current_accuracy'):
+                        acc = self.update_thread.current_accuracy
+                        if isinstance(acc, (float, int)):
+                            model_accuracy_text = f"{acc:.2%}"
+                        else:
+                            model_accuracy_text = "Calculating..."
+                    else:
+                        model_accuracy_text = "Calculating..."
 
                 key_metrics = f"""
                 <p>PSR: {psr_display} | PBR: {pbr_display}</p>
