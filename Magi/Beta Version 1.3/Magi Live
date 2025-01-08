@@ -876,6 +876,7 @@ class StockUpdateThread(QThread):
             # Final data cleaning
             X = latest_data[self.selected_features]
             X = X.fillna(0)  # Replace any remaining NaN values with 0
+            current_price = latest_data['Close'].iloc[0]
 
             # Scale the features
             try:
@@ -891,8 +892,10 @@ class StockUpdateThread(QThread):
                     predictions = {}
                     for name, model in self.predictor.items():
                         try:
+                            # Model predicts returns (e.g., -0.03 means -3% change)
                             pred = model.predict(X_scaled)[0]
                             predictions[name] = pred
+                            print(f"Model {name} return prediction: {pred:.4f} ({pred*100:.2f}%)")
                         except Exception as e:
                             print(f"Error in model {name} prediction: {e}")
                             predictions[name] = None
@@ -906,46 +909,51 @@ class StockUpdateThread(QThread):
                     
                     # Get weighted prediction
                     if hasattr(self, 'weight_adjuster'):
-                        prediction = self.weight_adjuster.get_weighted_prediction(predictions)
+                        predicted_return = self.weight_adjuster.get_weighted_prediction(predictions)
                         # Store for next update
                         self.last_prediction = predictions
+                        print(f"Weighted return prediction: {predicted_return:.4f} ({predicted_return*100:.2f}%)")
                     else:
                         # Fallback to simple average if weight adjuster not available
-                        prediction = sum(predictions.values()) / len(predictions)
+                        predicted_return = sum(predictions.values()) / len(predictions)
+                        print(f"Average return prediction: {predicted_return:.4f} ({predicted_return*100:.2f}%)")
                 else:
                     # Single model prediction
-                    prediction = self.predictor.predict(X_scaled)[0]
+                    predicted_return = self.predictor.predict(X_scaled)[0]
+                    print(f"Single model return prediction: {predicted_return:.4f} ({predicted_return*100:.2f}%)")
 
-                current_price = latest_data['Close'].iloc[0]
-
-                # Calculate percentage change
-                pct_change = ((prediction - current_price) / current_price) * 100
-
-                # Limit maximum daily change
-                MAX_DAILY_CHANGE = 7.0
-                if abs(pct_change) > MAX_DAILY_CHANGE:
-                    print(f"Warning: Prediction {pct_change:.2f}% exceeded maximum daily change of ±{MAX_DAILY_CHANGE}%")
-                    if pct_change > 0:
-                        prediction = current_price * (1 + MAX_DAILY_CHANGE/100)
-                    else:
-                        prediction = current_price * (1 - MAX_DAILY_CHANGE/100)
-                    print(f"Adjusted prediction to {prediction:.2f} ({MAX_DAILY_CHANGE if pct_change > 0 else -MAX_DAILY_CHANGE:.2f}%)")
+                # Convert predicted return to actual price
+                predicted_price = current_price * (1 + predicted_return)
+                print(f"Current price: {current_price:.2f}")
+                print(f"Predicted price: {predicted_price:.2f}")
 
                 # Track the prediction
-                self.model_tracker.track_performance(current_price, prediction)
+                self.model_tracker.track_performance(current_price, predicted_price)
 
                 # Update weights if we have actual value from previous prediction
                 if hasattr(self, 'weight_adjuster') and hasattr(self, 'last_prediction') and hasattr(self, 'last_actual'):
                     try:
                         self.weight_adjuster.update_weights(self.last_prediction, self.last_actual)
+                        # Debug output for weight updates
+                        if hasattr(self.weight_adjuster, 'weights'):
+                            print("Updated model weights:")
+                            for model_name, weight in self.weight_adjuster.weights.items():
+                                print(f"{model_name}: {weight:.3f}")
                     except Exception as e:
                         print(f"Error updating weights: {e}")
 
                 # Store current price as last actual for next update
                 self.last_actual = current_price
 
-                print(f"Prediction successful: {prediction:.2f} (change: {pct_change:.2f}%)")
-                return prediction
+                # Get model performance metrics
+                if hasattr(self.model_tracker, 'get_performance_stats'):
+                    stats = self.model_tracker.get_performance_stats()
+                    if stats:
+                        print("Model performance metrics:")
+                        for metric, value in stats.items():
+                            print(f"{metric}: {value}")
+
+                return predicted_price
 
             except Exception as e:
                 print(f"Error making prediction: {e}")
